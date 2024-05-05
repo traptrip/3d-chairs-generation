@@ -1269,7 +1269,7 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                 ref_latents = None
 
         # ================= Ancestral sampling loop =================
-        for i, t in enumerate(prog_bar([None] + list(timesteps))):
+        for i, t in enumerate([None] + list(timesteps)):
             progress = i / len(timesteps)
             render_size = render_size_p(progress)
 

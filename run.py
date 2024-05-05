@@ -160,7 +160,7 @@ if __name__ == "__main__":
     image_defaults["prompt"] = prompt
     image_defaults["scheduler"] = "DPMSolverMultistep"
     image_defaults["negative_prompt"] = ""
-    image_defaults["steps"] = 50
+    image_defaults["steps"] = 32
     image_defaults["adapter_ckpt"] = (
         "/home/and/projects/itmo/diploma/sd_fine_tuning/sd-2-1-chairs-lora/checkpoint-4500"
     )
@@ -229,19 +229,22 @@ if __name__ == "__main__":
         img2mv_pipeline.scheduler.config, timestep_spacing="trailing"
     )
     img2mv_pipeline.to(device)
-    mv_result = img2mv_pipeline(image, num_inference_steps=75).images[0]
-    mv_result.save("image3.jpg")
-    images = (
-        np.asarray(mv_result)
-        .reshape(3, 320, 2, 320, 3)
-        .transpose(0, 2, 1, 3, 4)
-        .reshape(6, 320, 320, 3)
-    )
+
+    mv_images = np.zeros((36, 320, 320, 3), dtype=np.uint8)
+    for i in range(6):
+        mv_result = img2mv_pipeline(image, num_inference_steps=10).images[0]
+        images = (
+            np.asarray(mv_result)
+            .reshape(3, 320, 2, 320, 3)
+            .transpose(0, 2, 1, 3, 4)
+            .reshape(6, 320, 320, 3)
+        )
+        mv_images[i * 6 : (i + 1) * 6] = images
 
     # TODO: add background segmentation for each image
 
     ## Save result
-    for i, img in enumerate(images):
+    for i, img in enumerate(mv_images):
         img = Image.fromarray(img).convert("RGB")
         img.save(f"image3_{i}.jpg")
 
@@ -271,13 +274,15 @@ if __name__ == "__main__":
     # torch.cuda.empty_cache()
 
     # Multi-view to 3D
+    print_gpu_memory()
+
     nerf_mesh_defaults["prompt"] = ""
     nerf_mesh_defaults["negative_prompt"] = ""
     nerf_mesh_defaults["scheduler"] = "DPMSolverMultistep"
     nerf_mesh_defaults["steps"] = 24
     nerf_mesh_defaults["denoising_strength"] = 0.5
     nerf_mesh_defaults["random_init"] = False
-    nerf_mesh_defaults["diff_bs"] = 4
+    nerf_mesh_defaults["diff_bs"] = 2
     nerf_mesh_defaults["n_inverse_steps"] = 80
     nerf_mesh_defaults["init_inverse_steps"] = 640
     nerf_mesh_defaults["tet_resolution"] = 128
@@ -305,7 +310,7 @@ if __name__ == "__main__":
         image.convert("RGBA"),
         *nerf_mesh_defaults.values(),
         *{f"superres_{k}": v for k, v in superres_defaults.items()}.values(),
-        *[np.asarray(Image.fromarray(img).convert("RGBA")) for img in images],
+        *[np.asarray(Image.fromarray(img).convert("RGBA")) for img in mv_images],
     )
     print(mesh_path)
 
