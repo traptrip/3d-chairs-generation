@@ -740,7 +740,7 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                 loss = pixel_rgb_loss = self.nerf.pixel_loss(
                     out_rgbs.reshape(target_rgbs.size()), target_rgbs,
                     weight=target_w / cam_weights_mean) * 4.5
-                pixel_rgb_loss_.append(pixel_rgb_loss.item())
+                pixel_rgb_loss_.append(pixel_rgb_loss.detach().cpu().item())
 
                 alphas_loss = self.nerf.pixel_loss(
                     out_alphas.reshape(target_m_blur.size()), target_m_blur,
@@ -750,8 +750,8 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                     target_n.permute(0, 3, 1, 2) if use_normal else None,
                     weight=out_normals_fg_weight.permute(0, 3, 1, 2)) * (normal_reg_weight * 10)
                 loss = loss + alphas_loss + normal_reg_loss
-                alphas_loss_.append(alphas_loss.item())
-                normal_reg_loss_.append(normal_reg_loss.item())
+                alphas_loss_.append(alphas_loss.detach().cpu().item())
+                normal_reg_loss_.append(normal_reg_loss.detach().cpu().item())
 
                 bin_weights_sum = outputs['weights'].float()
                 bin_width = outputs['ts'][0][:, 1].float()
@@ -762,7 +762,7 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                     bg_weights_sum * (torch.log(bg_weights_sum.clamp(min=1e-6)) - math.log(bg_width))
                 )) * (entropy_weight / target_rgbs.shape[:-1].numel())
                 loss = loss + entropy_loss
-                entropy_loss_.append(entropy_loss.item())
+                entropy_loss_.append(entropy_loss.detach().cpu().item())
 
                 if patch_rgb_weight > 0:
                     patch_rgb_loss = self.nerf.patch_loss(
@@ -771,7 +771,7 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                         weight=target_w[:, 0, 0, 0] / cam_weights_mean
                     ) * patch_rgb_weight
                     loss = loss + patch_rgb_loss
-                    patch_rgb_loss_.append(patch_rgb_loss.item())
+                    patch_rgb_loss_.append(patch_rgb_loss.detach().cpu().item())
 
                 if use_normal and patch_normal_weight > 0:
                     patch_normal_loss = self.nerf.patch_loss(
@@ -780,11 +780,13 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                         weight=target_w[:, 0, 0, 0] / cam_weights_mean
                     ) * patch_normal_weight
                     loss = loss + patch_normal_loss
-                    patch_normal_loss_.append(patch_normal_loss.item())
+                    patch_normal_loss_.append(patch_normal_loss.detach().cpu().item())
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+
+                torch.cuda.empty_cache()
 
             print_str = []
             for name, loss in zip([
@@ -805,6 +807,8 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
             print('\n' + ', '.join(print_str))
 
         self.nerf.decoder.train(decoder_training_prev)
+
+        torch.cuda.empty_cache()
 
     def mesh_optim(
             self, tgt_images, tgt_masks, tgt_normals,  # input images
@@ -901,7 +905,7 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                 loss = pixel_rgb_loss = self.nerf.pixel_loss(
                     out_rgbs.reshape(target_rgbs.size()), target_rgbs,
                     weight=target_w / cam_weights_mean) * 4.5
-                pixel_rgb_loss_.append(pixel_rgb_loss.item())
+                pixel_rgb_loss_.append(pixel_rgb_loss.detach().cpu().item())
 
                 if not mesh_is_simplified:
                     alphas_loss = self.nerf.pixel_loss(
@@ -980,6 +984,8 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                     in_mesh = Mesh(v=mesh_verts, f=mesh_faces, device=device)
                     in_mesh.auto_normal()
 
+                torch.cuda.empty_cache()
+
             print_str = []
             for name, loss in zip([
                     'pixel_rgb_loss',
@@ -1002,6 +1008,8 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
 
         self.nerf.decoder.train(decoder_training_prev)
 
+        torch.cuda.empty_cache()
+        
         return in_mesh
 
     @torch.no_grad()
@@ -1417,6 +1425,15 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                     tgt_normals = F.interpolate(
                         tgt_normals.squeeze(0).permute(0, 3, 1, 2), size=render_size, mode='bilinear'
                     ).permute(0, 2, 3, 1)[None]
+
+            # self.vae = None
+            # self.unet = None
+            # self.scheduler = None
+            # import gc
+            # gc.collect()
+            # torch.cuda.empty_cache()
+            self.nerf = self.nerf.cuda()
+
             if progress <= progress_to_dmtet:
                 self.nerf_optim(
                     tgt_images, tgt_masks, tgt_normals,

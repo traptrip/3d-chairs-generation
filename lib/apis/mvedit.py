@@ -233,6 +233,22 @@ class MVEditRunner:
             print("Stable Diffusion loaded.")
             gc.collect()
 
+    def unload_stable_diffusion(self):
+        self.stable_diffusion_checkpoint = None
+        self.vae = None
+        self.text_encoder = None
+        self.tokenizer = None
+        self.unet = None
+        self.safety_checker = None
+        self.feature_extractor = None
+
+        self.scheduler_ckpt = None
+        self.scheduler_type = None
+        self.scheduler = None
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def load_stablessdnerf(self):
         if self.stablessdnerf is None:
             print("\nLoading StableSSDNeRF...")
@@ -261,6 +277,7 @@ class MVEditRunner:
             self.stablessdnerf = None
             print("StableSSDNeRF unloaded.")
             gc.collect()
+            torch.cuda.empty_cache()
 
     def load_controlnet_ip2p(self):
         if self.controlnet_ip2p is None:
@@ -279,6 +296,7 @@ class MVEditRunner:
             self.controlnet_ip2p = None
             print("InstructPix2Pix ControlNet unloaded.")
             gc.collect()
+            torch.cuda.empty_cache()
 
     def load_scheduler(self, stable_diffusion_checkpoint, scheduler_type):
         print("\nLoading scheduler...")
@@ -352,6 +370,7 @@ class MVEditRunner:
             not hasattr(torch.nn.functional, "scaled_dot_product_attention")
         )
         gc.collect()
+        torch.cuda.empty_cache()
 
     def load_normal_model(self):
         if self.normal_model is None:
@@ -381,6 +400,7 @@ class MVEditRunner:
             self.normal_model = None
             print("Normal model unloaded.")
             gc.collect()
+            torch.cuda.empty_cache()
 
     def load_sam_predictor(self):
         if self.predictor is None:
@@ -403,6 +423,7 @@ class MVEditRunner:
             self.predictor = None
             print("SAM unloaded.")
             gc.collect()
+            torch.cuda.empty_cache()
 
     def load_zero123plus_pipeline(self, checkpoint, normal_controlnet=None):
         if checkpoint != self.zero123plus_checkpoint:
@@ -443,6 +464,7 @@ class MVEditRunner:
             self.zero123plus_checkpoint = None
             print("Zero123++ unloaded.")
             gc.collect()
+            torch.cuda.empty_cache()
 
     def load_matcher(self):
         if self.matcher is None:
@@ -457,6 +479,7 @@ class MVEditRunner:
             self.matcher = None
             print("Feature matcher unloaded.")
             gc.collect()
+            torch.cuda.empty_cache()
 
     def normal_shading_fun(
         self, world_pos=None, albedo=None, world_normal=None, fg_mask=None, **kwargs
@@ -475,7 +498,7 @@ class MVEditRunner:
         prog = gr.Progress().tqdm(None, total=6, unit="passes")
         set_random_seed(seed, deterministic=True)
 
-        for _ in range(1):
+        for _ in range(3):
             mv_result = self.zero123plus_pipe(
                 in_img, num_inference_steps=num_inference_steps, guidance_scale=4.0
             ).images[0]
@@ -921,6 +944,7 @@ class MVEditRunner:
                 sam_predictor=self.predictor,
                 to_np=True,
             )[0]
+        self.unload_sam_predictor()
         return Image.fromarray(in_img)
 
     @_api_wrapper
@@ -940,6 +964,7 @@ class MVEditRunner:
             out_margin=160 - self.zero123plus_crop_half_size,
         )
         print("Zero123++ generation finished.")
+        self.unload_zero123plus_pipeline()
         return init_images
 
     @_api_wrapper
@@ -957,6 +982,7 @@ class MVEditRunner:
         print(f"\nRunning Zero123++ generation with seed {seed}...")
         init_images = self.proc_zero123plus(seed, in_img, seg_padding=64)
         print("Zero123++ generation finished.")
+        self.unload_zero123plus_pipeline()
         return init_images
 
     @_api_wrapper
@@ -1022,8 +1048,8 @@ class MVEditRunner:
 
         elev, in_pose = elev_estimation(
             Image.fromarray(rgba_to_rgb(in_img, bg_color=(127, 127, 127))),
-            init_images, #[init_images[i] for i in [0, 5, 6, 11, 12, 17, 18, 23, 24, 29, 30, 35]],
-            camera_poses, #camera_poses[[0, 5, 6, 11, 12, 17, 18, 23, 24, 29, 30, 35]],
+            init_images,  # [init_images[i] for i in [0, 5, 6, 11, 12, 17, 18, 23, 24, 29, 30, 35]],
+            camera_poses,  # camera_poses[[0, 5, 6, 11, 12, 17, 18, 23, 24, 29, 30, 35]],
             intrinsics,
             intrinsics_size,
             self.matcher,
@@ -1094,6 +1120,12 @@ class MVEditRunner:
         out_path = osp.join(cache_dir, f"output_{uuid.uuid4()}.glb")
         out_mesh.write(out_path, flip_yz=True)
         print("Zero123++ to mesh finished.")
+
+        self.unload_normal_model()
+        self.unload_matcher()
+        self.unload_stable_diffusion()
+        self.unload_sam_predictor()
+
         return out_path
 
     @_api_wrapper
@@ -1235,6 +1267,12 @@ class MVEditRunner:
         out_path = osp.join(cache_dir, f"output_{uuid.uuid4()}.glb")
         out_mesh.write(out_path, flip_yz=True)
         print("Zero123++ to mesh finished.")
+
+        self.unload_normal_model()
+        self.unload_matcher()
+        self.unload_stable_diffusion()
+        self.unload_sam_predictor()
+
         return out_path
 
     @_api_wrapper
@@ -1412,6 +1450,7 @@ class MVEditRunner:
             return_dict=False,
         )[0][0]
         print("Text-to-Image finished.")
+        self.unload_stable_diffusion()
         return out_img
 
     @_api_wrapper

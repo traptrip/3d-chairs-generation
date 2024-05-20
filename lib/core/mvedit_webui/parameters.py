@@ -77,6 +77,8 @@ image_defaults = OrderedDict(
             "text, watermark, worst quality, low quality, depth of field, blurry, out of focus, low-res, "
             "illustration, painting, drawing",
         ),
+        ("adapter_ckpt", None),
+        ("adapter_filename", None),
     ]
 )
 
