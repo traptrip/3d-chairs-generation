@@ -127,6 +127,21 @@ superres_defaults = OrderedDict(
     ]
 )
 
+video_defaults = OrderedDict(
+    [
+        ("front_view_id", None),
+        ("layer", "RGB"),
+        ("distance", 4),
+        ("length", 5),
+        ("elevation", 10),
+        ("fov", 30),
+        ("resolution", 512),
+        ("fps", 30),
+        ("render_bs", 8),
+        ("cache_dir", None),
+    ]
+)
+
 
 def remove_background(
     image: Image.Image,
@@ -527,85 +542,6 @@ def run_zero123plus_to_mesh(device, seed, in_img, *args, cache_dir=None, **kwarg
     return out_path
 
 
-def run_video(
-    proc_dict,
-    front_view_id,
-    distance,
-    elevation,
-    fov,
-    length,
-    resolution,
-    lossless,
-    layer="RGB",
-    cache_dir=None,
-    fps=30,
-    render_bs=8,
-):
-    torch.cuda.empty_cache()
-    proc_dict = json.loads(proc_dict)
-    mesh_path = proc_dict["mesh_path"]
-    in_mesh = Mesh.load(mesh_path, device=device, flip_yz=True)
-
-    if front_view_id is not None and 0 <= front_view_id < self.preproc_num_views:
-        front_azi = front_view_id / self.preproc_num_views * (2 * math.pi)
-        print(f"\nUsing front view id {front_view_id}...")
-    else:
-        front_azi = 0
-
-    elevation = np.radians(elevation)
-    num_cameras = int(round(length * fps))
-    camera_poses = random_surround_views(
-        distance,
-        num_cameras,
-        elevation,
-        elevation,
-        use_linspace=True,
-        begin_rad=front_azi,
-    )[:, :3].to(device)
-    focal = resolution / (2 * np.tan(np.radians(fov / 2)))
-    intrinsics = torch.tensor(
-        [focal, focal, resolution / 2, resolution / 2],
-        dtype=torch.float32,
-        device=device,
-    )
-
-    mesh_renderer = copy(self.mesh_renderer)
-    mesh_renderer.ssaa = 2
-
-    out_path = os.path.join(cache_dir, f"video_{uuid.uuid4()}.mp4")
-    writer = VideoWriter(
-        out_path, resolution=(resolution, resolution), lossless=lossless, fps=fps
-    )
-    for pose_batch in camera_poses.split(render_bs, dim=0):
-        render_out = mesh_renderer(
-            [in_mesh],
-            pose_batch[None],
-            intrinsics[None, None],
-            resolution,
-            resolution,
-            normal_bg=[1.0, 1.0, 1.0],
-            shading_fun=self.normal_shading_fun if in_mesh.textureless else None,
-        )
-        if layer == "RGB":
-            image_batch = render_out["rgba"][0]
-            image_batch = image_batch[..., :3] + (1 - image_batch[..., 3:4])
-        elif layer == "Normal":
-            image_batch = render_out["normal"][0]
-        else:
-            raise ValueError(f"Unknown layer: {layer}")
-        image_batch = (
-            torch.round(image_batch.clamp(min=0, max=1) * 255)
-            .to(torch.uint8)
-            .cpu()
-            .numpy()
-        )
-        for image_single in image_batch:
-            writer.write(image_single)
-    writer.close()
-
-    return out_path
-
-
 def process_v0(prompt):
     image_defaults["prompt"] = prompt
 
@@ -713,7 +649,7 @@ def process_v0(prompt):
     # 3D to video
 
 
-def process(prompt):
+def process(prompt, cache_dir):
     image_defaults["prompt"] = prompt
 
     runner = MVEditRunner(
@@ -728,11 +664,11 @@ def process(prompt):
 
     # Text to image
     image = runner.run_text_to_img(seed, *image_defaults.values())
-    # image.save("image1.png")
+    image.save("image1.png")
 
     # Segment first plan objects
     image = runner.run_segmentation(image)
-    # image.save("image2.png")
+    image.save("image2.png")
 
     # Image to multi-view
     mv_images = runner.run_zero123plus(seed, image)
@@ -741,8 +677,6 @@ def process(prompt):
     #     img.save(f"image3_{i}.jpg")
 
     # Multi-view to 3D
-    cache_dir = Path("./meshes")
-    cache_dir.mkdir(exist_ok=True, parents=True)
     mesh_path = runner.run_zero123plus_to_mesh(
         seed,
         image.convert("RGBA"),
@@ -758,7 +692,27 @@ def process(prompt):
 
     return mesh_path
 
-    # 3D to video
+
+def mesh_to_video(mesh_path, cache_dir):
+    video_defaults["cache_dir"] = cache_dir
+
+    runner = MVEditRunner(
+        device=torch.device("cuda"),
+        local_files_only=False,
+        unload_models=True,
+        out_dir=None,
+        save_interval=None,
+        debug=False,
+        no_safe=True,
+    )
+
+    video_path = runner.run_mesh_to_video(mesh_path, **video_defaults)
+
+    runner = None
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    return video_path
 
 
 # Configs
@@ -767,8 +721,8 @@ device = "cuda:0"
 
 # image_defaults["prompt"] = prompt
 image_defaults["scheduler"] = "DPMSolverMultistep"
-image_defaults["negative_prompt"] = ""
-image_defaults["steps"] = 32
+image_defaults["negative_prompt"] = "cheap, low-cost, aged, discounted"
+image_defaults["steps"] = 50
 image_defaults["adapter_ckpt"] = (
     "/home/and/projects/itmo/diploma/sd_fine_tuning/sd-2-1-chairs-lora/checkpoint-4500"
 )
@@ -798,14 +752,45 @@ if __name__ == "__main__":
     import pandas as pd
     from tqdm import tqdm
 
-    data_path = "/home/and/projects/itmo/diploma/data/products/dataset_filtered_with_summary_v0.2.csv"
-    df = pd.read_csv(data_path)
-    prompts = df.product_summary.values
-
+    # data_path = "/home/and/projects/itmo/diploma/data/products/dataset_filtered_with_summary_v0.2.csv"
+    # df = pd.read_csv(data_path)
+    # prompts = df.product_summary.values
     # mesh_paths = ["" for _ in range(len(df))]
     # for i, prompt in enumerate(tqdm(prompts)):
     #     mesh_paths[i] = process(prompt)
     #     df["mesh_path"] = mesh_paths
     #     df.to_csv("data_with_meshes.csv", index=False)
 
-    
+    # df = pd.read_csv("data_with_meshes.csv")
+    # mesh_paths = pd.Series(["outputs/"] * len(df)) + df["mesh_path"]
+    # video_dir = Path("outputs/videos")
+    # video_dir.mkdir(parents=True, exist_ok=True)
+    # video_paths = [""] * len(df)
+    # for i, mesh_path in enumerate(tqdm(mesh_paths)):
+    #     video_paths[i] = mesh_to_video(mesh_path, video_dir)
+    #     df["video_path"] = video_paths
+    #     df.to_csv("data_with_meshes_and_videos.csv", index=False)
+
+    # df = pd.read_csv("val_data.csv", sep=";")
+    # prompts = df.product_summary.values
+    # mesh_paths = ["" for _ in range(len(df))]
+    # meshes_dir = Path("outputs/val/meshes")
+    # meshes_dir.mkdir(parents=True, exist_ok=True)
+    # for i, prompt in enumerate(tqdm(prompts)):
+    #     mesh_paths[i] = process(prompt, meshes_dir)
+    #     df["mesh_path"] = mesh_paths
+    #     df.to_csv("val_data_with_meshes.csv", index=False)
+
+    # df = pd.read_csv("val_data_with_meshes.csv")
+    # mesh_paths = df["mesh_path"]
+    # video_dir = Path("outputs/val/videos")
+    # video_dir.mkdir(parents=True, exist_ok=True)
+    # video_paths = [""] * len(df)
+    # for i, mesh_path in enumerate(tqdm(mesh_paths)):
+    #     video_paths[i] = mesh_to_video(mesh_path, video_dir)
+    #     df["video_path"] = video_paths
+    #     df.to_csv("val_data_with_meshes_and_videos.csv", index=False)
+
+    prompt = """Wing chair from IKEA called Vibberbo.\n Furniture type: armchair.\n High back for extra neck support.\n Materials:\n  + Frame: plywood, polyurethane foam, particleboard, solid wood\n  + Seat cushion: polyurethane foam\n  + Leg: solid wood, stain.\n Upholstery: 100% cotton fabric""".strip()
+    mesh_path = process(prompt, ".")
+    print(mesh_to_video(mesh_path, "."))

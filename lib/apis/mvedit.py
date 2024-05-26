@@ -5,6 +5,7 @@ import shutil
 import math
 import uuid
 import json
+from pathlib import Path
 import numpy as np
 import torch
 import diffusers
@@ -925,6 +926,126 @@ class MVEditRunner:
             json.dumps(proc_dict),
             front_view_id,
         )
+
+    @_api_wrapper
+    def run_mesh_to_video(
+        self,
+        in_mesh_path,
+        front_view_id=None,
+        layer="RGB",
+        distance=4,
+        length=5,
+        elevation=10,
+        fov=30,
+        resolution=512,
+        fps=30,
+        render_bs=8,
+        cache_dir=None,
+    ):
+        # Get images
+        if self.empty_cache:
+            torch.cuda.empty_cache()
+
+        proc_dict = preprocess_mesh(in_mesh_path, cache_dir=cache_dir)
+        if "mesh_obj" in proc_dict:
+            in_mesh = proc_dict["mesh_obj"]
+        else:
+            in_mesh = Mesh.load(
+                proc_dict["mesh_path"], device=self.device, flip_yz=True
+            )
+        in_mesh = in_mesh.to(self.device)
+        camera_poses = random_surround_views(
+            self.proc_3d_to_3d_camera_distance,
+            self.preproc_num_views,
+            0,
+            0,
+            use_linspace=True,
+            begin_rad=0,
+        )[:, :3].to(self.device)
+        focal = self.preproc_render_size / (
+            2 * np.tan(np.radians(self.proc_3d_to_3d_fov / 2))
+        )
+        intrinsics = torch.tensor(
+            [focal, focal, self.preproc_render_size / 2, self.preproc_render_size / 2],
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        mv_images = []
+        for pose_batch in camera_poses.split(render_bs, dim=0):
+            render_out = self.mesh_renderer(
+                [in_mesh],
+                pose_batch[None],
+                intrinsics[None, None],
+                self.preproc_render_size,
+                self.preproc_render_size,
+                shading_fun=self.normal_shading_fun if in_mesh.textureless else None,
+            )
+            image_batch = render_out["rgba"][0]
+            image_batch[..., :3] /= image_batch[..., 3:4].clamp(min=1e-6)
+            image_batch = torch.round(image_batch * 255).to(torch.uint8).cpu().numpy()
+            for image_single in image_batch:
+                mv_images.append(Image.fromarray(image_single))
+        proc_dict.pop("mesh_obj", None)
+
+        # Render video
+        if front_view_id is not None and 0 <= front_view_id < self.preproc_num_views:
+            front_azi = front_view_id / self.preproc_num_views * (2 * math.pi)
+            print(f"\nUsing front view id {front_view_id}...")
+        else:
+            front_azi = 0
+
+        elevation = np.radians(elevation)
+        num_cameras = int(round(length * fps))
+        camera_poses = random_surround_views(
+            distance,
+            num_cameras,
+            elevation,
+            elevation,
+            use_linspace=True,
+            begin_rad=front_azi,
+        )[:, :3].to(self.device)
+        focal = resolution / (2 * np.tan(np.radians(fov / 2)))
+        intrinsics = torch.tensor(
+            [focal, focal, resolution / 2, resolution / 2],
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        mesh_renderer = copy(self.mesh_renderer)
+        mesh_renderer.ssaa = 2
+
+        mesh_filename = Path(in_mesh_path).stem
+        out_path = osp.join(cache_dir, f"video_{mesh_filename}.mp4")
+        writer = VideoWriter(out_path, resolution=(resolution, resolution), fps=fps)
+        for pose_batch in camera_poses.split(render_bs, dim=0):
+            render_out = mesh_renderer(
+                [in_mesh],
+                pose_batch[None],
+                intrinsics[None, None],
+                resolution,
+                resolution,
+                normal_bg=[1.0, 1.0, 1.0],
+                shading_fun=self.normal_shading_fun if in_mesh.textureless else None,
+            )
+            if layer == "RGB":
+                image_batch = render_out["rgba"][0]
+                image_batch = image_batch[..., :3] + (1 - image_batch[..., 3:4])
+            elif layer == "Normal":
+                image_batch = render_out["normal"][0]
+            else:
+                raise ValueError(f"Unknown layer: {layer}")
+            image_batch = (
+                torch.round(image_batch.clamp(min=0, max=1) * 255)
+                .to(torch.uint8)
+                .cpu()
+                .numpy()
+            )
+            for image_single in image_batch:
+                writer.write(image_single)
+        writer.close()
+
+        return out_path
 
     @_api_wrapper
     def run_segmentation(self, in_img):

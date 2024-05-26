@@ -1,7 +1,9 @@
 import os
 import os.path as osp
 import sys
-sys.path.append(os.path.abspath(os.path.join(__file__, '../../../../imagepacker/')))
+import shutil
+
+sys.path.append(os.path.abspath(os.path.join(__file__, "../../../../imagepacker/")))
 
 import uuid
 import tempfile
@@ -33,17 +35,18 @@ def safe_normalize(x, eps=1e-20):
 
 class Mesh:
     def __init__(
-            self,
-            v=None,
-            f=None,
-            vn=None,
-            fn=None,
-            vt=None,
-            ft=None,
-            vc=None,
-            albedo=None,
-            device=None,
-            textureless=False):
+        self,
+        v=None,
+        f=None,
+        vn=None,
+        fn=None,
+        vt=None,
+        ft=None,
+        vc=None,
+        albedo=None,
+        device=None,
+        textureless=False,
+    ):
         self.device = device
         self.v = v
         self.vn = vn
@@ -68,7 +71,9 @@ class Mesh:
         self.f = self.f.detach() if self.f is not None else None
         self.fn = self.fn.detach() if self.fn is not None else None
         self.ft = self.ft.detach() if self.ft is not None else None
-        self.face_normals = self.face_normals.detach() if self.face_normals is not None else None
+        self.face_normals = (
+            self.face_normals.detach() if self.face_normals is not None else None
+        )
         self.albedo = self.albedo.detach() if self.albedo is not None else None
         return self
 
@@ -236,7 +241,9 @@ class Mesh:
             # init an empty texture
             print(f"[load_obj] init empty albedo!")
             # albedo = np.random.rand(1024, 1024, 3).astype(np.float32)
-            albedo = np.ones((1024, 1024, 3), dtype=np.float32) * np.array([0.5, 0.5, 0.5])  # default color
+            albedo = np.ones((1024, 1024, 3), dtype=np.float32) * np.array(
+                [0.5, 0.5, 0.5]
+            )  # default color
             mesh.textureless = True
         else:
             albedo = cv2.imread(albedo_path, cv2.IMREAD_UNCHANGED)
@@ -267,7 +274,7 @@ class Mesh:
         if isinstance(_data, trimesh.Scene):
             mesh_keys = list(_data.geometry.keys())
             assert (
-                    len(mesh_keys) == 1
+                len(mesh_keys) == 1
             ), f"{path} contains more than one meshes, not supported!"
             _mesh = _data.geometry[mesh_keys[0]]
 
@@ -283,10 +290,13 @@ class Mesh:
                 texture = np.array(_material.baseColorTexture).astype(np.float32) / 255
             elif isinstance(_material, trimesh.visual.material.SimpleMaterial):
                 texture = (
-                        np.array(_material.to_pbr().baseColorTexture).astype(np.float32) / 255
+                    np.array(_material.to_pbr().baseColorTexture).astype(np.float32)
+                    / 255
                 )
             else:
-                raise NotImplementedError(f"material type {type(_material)} not supported!")
+                raise NotImplementedError(
+                    f"material type {type(_material)} not supported!"
+                )
 
             print(f"[load_obj] load texture: {texture.shape}")
             mesh.albedo = torch.tensor(texture, dtype=torch.float32, device=device)
@@ -371,11 +381,11 @@ class Mesh:
     def auto_uv(self, cache_path=None, vmap=True):
         # try to load cache
         if cache_path is not None:
-            cache_path = os.path.splitext(cache_path)[0] + '_uv.npz'
+            cache_path = os.path.splitext(cache_path)[0] + "_uv.npz"
 
         if cache_path is not None and os.path.exists(cache_path):
             data = np.load(cache_path)
-            vt_np, ft_np, vmapping = data['vt'], data['ft'], data['vmapping']
+            vt_np, ft_np, vmapping = data["vt"], data["ft"], data["vmapping"]
         else:
             v_np = self.v.detach().cpu().numpy()
             f_np = self.f.detach().int().cpu().numpy()
@@ -397,7 +407,9 @@ class Mesh:
 
         if vmap:
             # remap v/f to vt/ft, so each v correspond to a unique vt. (necessary for gltf)
-            vmapping = torch.from_numpy(vmapping.astype(np.int64)).long().to(self.device)
+            vmapping = (
+                torch.from_numpy(vmapping.astype(np.int64)).long().to(self.device)
+            )
             self.align_v_to_vt(vmapping)
 
     def align_v_to_vt(self, vmapping=None):
@@ -405,7 +417,9 @@ class Mesh:
         if vmapping is None:
             ft = self.ft.view(-1).long()
             f = self.f.view(-1).long()
-            vmapping = torch.zeros(self.vt.shape[0], dtype=torch.long, device=self.device)
+            vmapping = torch.zeros(
+                self.vt.shape[0], dtype=torch.long, device=self.device
+            )
             vmapping[ft] = f  # scatter, randomly choose one if index is not unique
         if self.vn is not None and (self.f == self.fn).all():
             self.vn = self.vn[vmapping]
@@ -417,14 +431,16 @@ class Mesh:
         if vmapping is None:
             ft = self.ft.view(-1).long()
             fn = self.f.view(-1).long()
-            vmapping = torch.zeros(self.vt.shape[0], dtype=torch.long, device=self.device)
+            vmapping = torch.zeros(
+                self.vt.shape[0], dtype=torch.long, device=self.device
+            )
             vmapping[ft] = fn  # scatter, randomly choose one if index is not unique
         self.vn = self.vn[vmapping]
         self.fn = self.ft
 
     def to(self, device):
         self.device = device
-        for name in ['v', 'f', 'vn', 'fn', 'vt', 'ft', 'albedo', 'vc', 'face_normals']:
+        for name in ["v", "f", "vn", "fn", "vt", "ft", "albedo", "vc", "face_normals"]:
             tensor = getattr(self, name)
             if tensor is not None:
                 setattr(self, name, tensor.to(device))
@@ -441,7 +457,8 @@ class Mesh:
             vc=self.vc,
             albedo=self.albedo,
             device=self.device,
-            textureless=self.textureless)
+            textureless=self.textureless,
+        )
 
     def write(self, path, flip_yz=False):
         mesh = self.copy()
@@ -452,14 +469,14 @@ class Mesh:
             mesh.vn[..., 1] = -mesh.vn[..., 1]
             mesh.v[..., [1, 2]] = mesh.v[..., [2, 1]]
             mesh.vn[..., [1, 2]] = mesh.vn[..., [2, 1]]
-        if path.endswith('.ply'):
+        if path.endswith(".ply"):
             mesh.write_ply(path)
-        elif path.endswith('.obj'):
+        elif path.endswith(".obj"):
             mesh.write_obj(path)
-        elif path.endswith('.glb') or path.endswith('.gltf'):
+        elif path.endswith(".glb") or path.endswith(".gltf"):
             mesh.write_glb(path)
         else:
-            raise NotImplementedError(f'format {path} not supported!')
+            raise NotImplementedError(f"format {path} not supported!")
 
     # write to ply file (only geom)
     def write_ply(self, path):
@@ -482,15 +499,20 @@ class Mesh:
         if (self.fn != self.ft).any():
             self.align_vn_to_vt()
 
-        assert self.v.shape[0] == self.vn.shape[0] and self.v.shape[0] == self.vt.shape[0]
+        assert (
+            self.v.shape[0] == self.vn.shape[0] and self.v.shape[0] == self.vt.shape[0]
+        )
 
         f_np = self.f.detach().cpu().numpy().astype(np.uint32)
         v_np = self.v.detach().cpu().numpy().astype(np.float32)
         vt_np = self.vt.detach().cpu().numpy().astype(np.float32)
         vn_np = self.vn.detach().cpu().numpy().astype(np.float32)
 
-        albedo = self.albedo.detach().cpu().numpy() if self.albedo is not None \
+        albedo = (
+            self.albedo.detach().cpu().numpy()
+            if self.albedo is not None
             else np.full((1024, 1024, 3), 0.5, dtype=np.float32)
+        )
         albedo = (albedo * 255).astype(np.uint8)
         albedo = cv2.cvtColor(albedo, cv2.COLOR_RGB2BGR)
 
@@ -498,21 +520,26 @@ class Mesh:
         v_np_blob = v_np.tobytes()
         vt_np_blob = vt_np.tobytes()
         vn_np_blob = vn_np.tobytes()
-        albedo_blob = cv2.imencode('.png', albedo)[1].tobytes()
+        albedo_blob = cv2.imencode(".png", albedo)[1].tobytes()
 
         gltf = pygltflib.GLTF2(
             scene=0,
             scenes=[pygltflib.Scene(nodes=[0])],
             nodes=[pygltflib.Node(mesh=0)],
-            meshes=[pygltflib.Mesh(primitives=[
-                pygltflib.Primitive(
-                    # indices to accessors (0 is triangles)
-                    attributes=pygltflib.Attributes(
-                        POSITION=1, TEXCOORD_0=2, NORMAL=3
-                    ),
-                    indices=0, material=0,
+            meshes=[
+                pygltflib.Mesh(
+                    primitives=[
+                        pygltflib.Primitive(
+                            # indices to accessors (0 is triangles)
+                            attributes=pygltflib.Attributes(
+                                POSITION=1, TEXCOORD_0=2, NORMAL=3
+                            ),
+                            indices=0,
+                            material=0,
+                        )
+                    ]
                 )
-            ])],
+            ],
             materials=[
                 pygltflib.Material(
                     pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
@@ -528,8 +555,12 @@ class Mesh:
                 pygltflib.Texture(sampler=0, source=0),
             ],
             samplers=[
-                pygltflib.Sampler(magFilter=pygltflib.LINEAR, minFilter=pygltflib.LINEAR_MIPMAP_LINEAR,
-                                  wrapS=pygltflib.REPEAT, wrapT=pygltflib.REPEAT),
+                pygltflib.Sampler(
+                    magFilter=pygltflib.LINEAR,
+                    minFilter=pygltflib.LINEAR_MIPMAP_LINEAR,
+                    wrapS=pygltflib.REPEAT,
+                    wrapT=pygltflib.REPEAT,
+                ),
             ],
             images=[
                 # use embedded (buffer) image
@@ -537,7 +568,12 @@ class Mesh:
             ],
             buffers=[
                 pygltflib.Buffer(
-                    byteLength=len(f_np_blob) + len(v_np_blob) + len(vt_np_blob) + len(vn_np_blob) + len(albedo_blob))
+                    byteLength=len(f_np_blob)
+                    + len(v_np_blob)
+                    + len(vt_np_blob)
+                    + len(vn_np_blob)
+                    + len(albedo_blob)
+                )
             ],
             # buffer view (based on dtype)
             bufferViews=[
@@ -574,7 +610,10 @@ class Mesh:
                 # texture; as none target
                 pygltflib.BufferView(
                     buffer=0,
-                    byteOffset=len(f_np_blob) + len(v_np_blob) + len(vt_np_blob) + len(vn_np_blob),
+                    byteOffset=len(f_np_blob)
+                    + len(v_np_blob)
+                    + len(vt_np_blob)
+                    + len(vn_np_blob),
                     byteLength=len(albedo_blob),
                 ),
             ],
@@ -619,7 +658,9 @@ class Mesh:
         )
 
         # set actual data
-        gltf.set_binary_blob(f_np_blob + v_np_blob + vt_np_blob + vn_np_blob + albedo_blob)
+        gltf.set_binary_blob(
+            f_np_blob + v_np_blob + vt_np_blob + vn_np_blob + albedo_blob
+        )
 
         # glb = b"".join(gltf.save_to_bytes())
         gltf.save(path)
@@ -690,7 +731,10 @@ def normalize_mesh(mesh, tgt_radius=0.9):
 
 
 def check_has_texture_single(geom):
-    return isinstance(geom.visual, TextureVisuals) and geom.visual.material.baseColorTexture is not None
+    return (
+        isinstance(geom.visual, TextureVisuals)
+        and geom.visual.material.baseColorTexture is not None
+    )
 
 
 def check_has_texture(mesh):
@@ -706,15 +750,15 @@ def check_has_texture(mesh):
 
 
 def create_texture(geom):
-    if hasattr(geom.visual, 'material') and hasattr(geom.visual.material, 'main_color'):
+    if hasattr(geom.visual, "material") and hasattr(geom.visual.material, "main_color"):
         main_color = tuple(geom.visual.material.main_color)
     else:
         main_color = (128, 128, 128)
     geom.visual = trimesh.visual.TextureVisuals(
         uv=np.full((geom.vertices.shape[0], 2), 0.5),
         material=trimesh.visual.material.PBRMaterial(
-            baseColorTexture=Image.new('RGB', (8, 8), main_color)
-        )
+            baseColorTexture=Image.new("RGB", (8, 8), main_color)
+        ),
     )
 
 
@@ -751,7 +795,7 @@ def preprocess_mesh(in_mesh_path, normalize=True, cache_dir=None):
 
     in_mesh = trimesh.load(in_mesh_path)
 
-    mesh_requires_update = purge_scene(in_mesh) or (not in_mesh_path.endswith('.obj'))
+    mesh_requires_update = purge_scene(in_mesh) or (not in_mesh_path.endswith(".obj"))
     has_texture = check_has_texture(in_mesh)
     is_multi_object = isinstance(in_mesh, trimesh.Scene) and len(in_mesh.geometry) > 1
     if is_multi_object and not all(has_texture):
@@ -759,44 +803,51 @@ def preprocess_mesh(in_mesh_path, normalize=True, cache_dir=None):
         mesh_requires_update = True
 
     if mesh_requires_update:
-        in_mesh_path = osp.join(tmp_dir, 'in_mesh.obj')
+        in_mesh_path = osp.join(tmp_dir, "in_mesh.obj")
         in_mesh.export(in_mesh_path)
 
     out_dict = dict()
 
     if normalize or is_multi_object:
         if is_multi_object:
-            packed_mesh_path = osp.join(tmp_dir, 'packed_mesh.obj')
+            packed_mesh_path = osp.join(tmp_dir, "packed_mesh.obj")
             ori_dir = osp.abspath(os.getcwd())
-            sys.argv = ['',
-                        osp.abspath(in_mesh_path),
-                        '-o', osp.abspath(packed_mesh_path)[:-4],
-                        '--no-crop']
+            sys.argv = [
+                "",
+                osp.abspath(in_mesh_path),
+                "-o",
+                osp.abspath(packed_mesh_path)[:-4],
+                "--no-crop",
+            ]
             objuvpacker.main()
             os.chdir(ori_dir)
 
-            packed_mesh = Mesh.load(packed_mesh_path, flip_yz=True, device='cpu')
+            packed_mesh = Mesh.load(packed_mesh_path, flip_yz=True, device="cpu")
             in_height, in_width = packed_mesh.albedo.shape[:2]
             out_width = 2 ** math.ceil(math.log2(in_width))
             out_height = 2 ** math.ceil(math.log2(in_height))
             pad_width = out_width - in_width
             pad_height = out_height - in_height
-            packed_mesh.albedo = F.pad(packed_mesh.albedo, (0, 0, 0, pad_width, 0, pad_height), 'constant', 0.0)
+            packed_mesh.albedo = F.pad(
+                packed_mesh.albedo, (0, 0, 0, pad_width, 0, pad_height), "constant", 0.0
+            )
             packed_mesh.vt[:, 0] *= in_width / out_width
             packed_mesh.vt[:, 1] *= in_height / out_height
         else:
-            packed_mesh = Mesh.load(in_mesh_path, flip_yz=True, device='cpu')
+            packed_mesh = Mesh.load(in_mesh_path, flip_yz=True, device="cpu")
 
         if normalize:
             packed_mesh, center, scale = normalize_mesh(packed_mesh)
             out_dict.update(center=center, scale=scale)
 
-        proc_mesh_path = osp.join(tmp_dir, 'proc_mesh.obj')
+        proc_mesh_path = osp.join(tmp_dir, "proc_mesh.obj")
         packed_mesh.write(proc_mesh_path, flip_yz=True)
 
         out_dict.update(mesh_path=proc_mesh_path, mesh_obj=packed_mesh)
 
     else:
         out_dict.update(mesh_path=in_mesh_path)
+
+    shutil.rmtree(tmp_dir)
 
     return out_dict
