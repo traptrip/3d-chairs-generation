@@ -492,11 +492,10 @@ class MVEditRunner:
         )
 
     def proc_zero123plus(
-        self, seed, in_img, seg_padding, out_margin=0, num_inference_steps=40
+        self, seed, in_img, seg_padding, out_margin=0, num_inference_steps=40, pbar=None
     ):
         init_images = []
         init_normals = []
-        prog = gr.Progress().tqdm(None, total=6, unit="passes")
         set_random_seed(seed, deterministic=True)
 
         for _ in range(3):
@@ -526,7 +525,8 @@ class MVEditRunner:
             )
             for img in mv_result:
                 init_images.append(Image.fromarray(img))
-            prog.update(1)
+            if pbar:
+                pbar.update(1)
 
             in_img_mirror = ImageOps.mirror(in_img)
             mv_result = self.zero123plus_pipe(
@@ -558,7 +558,8 @@ class MVEditRunner:
             )
             for img in mv_result:
                 init_images.append(ImageOps.mirror(Image.fromarray(img)))
-            prog.update(1)
+            if pbar:
+                pbar.update(1)
 
         if self.zero123plus_normal_pipe is not None:
             init_images_rgba = do_segmentation_pil(
@@ -603,6 +604,7 @@ class MVEditRunner:
         camera_poses=None,
         use_reference=False,
         use_normal=False,
+        pbar=None,
         **kwargs,
     ):
         print(nerf_mesh_kwargs)
@@ -657,7 +659,6 @@ class MVEditRunner:
             + (nerf_mesh_kwargs["end_lr"] - nerf_mesh_kwargs["start_lr"]) * p,
             tet_resolution=nerf_mesh_kwargs["tet_resolution"],
             bake_texture=not superres_kwargs["do_superres"],
-            prog_bar=gr.Progress().tqdm,
             out_dir=self.out_dir_3d,
             save_interval=self.save_interval,
             save_all_interval=self.save_interval,
@@ -668,6 +669,7 @@ class MVEditRunner:
                 mid_num=nerf_mesh_kwargs["max_num_views"] // 2,
             ),
             debug=self.debug,
+            pbar=pbar,
             **kwargs,
         )
         return out_mesh, ingp_states
@@ -1069,7 +1071,7 @@ class MVEditRunner:
         return Image.fromarray(in_img)
 
     @_api_wrapper
-    def run_zero123plus(self, seed, in_img):
+    def run_zero123plus(self, seed, in_img, pbar):
         self.load_zero123plus_pipeline("sudo-ai/zero123plus-v1.1")
         if self.unload_models:
             self.unload_stablessdnerf()
@@ -1083,6 +1085,7 @@ class MVEditRunner:
             in_img,
             seg_padding=32,
             out_margin=160 - self.zero123plus_crop_half_size,
+            pbar=pbar,
         )
         print("Zero123++ generation finished.")
         self.unload_zero123plus_pipeline()
@@ -1107,7 +1110,9 @@ class MVEditRunner:
         return init_images
 
     @_api_wrapper
-    def run_zero123plus_to_mesh(self, seed, in_img, *args, cache_dir=None, **kwargs):
+    def run_zero123plus_to_mesh(
+        self, seed, in_img, *args, cache_dir=None, pbar=None, **kwargs
+    ):
         nerf_mesh_kwargs, superres_kwargs, init_images = parse_3d_args(
             list(args), kwargs
         )
@@ -1193,6 +1198,7 @@ class MVEditRunner:
             ip_adapter=self.ip_adapter,
             use_reference=True,
             use_normal=True,
+            pbar=pbar,
         )
 
         if superres_kwargs["do_superres"]:

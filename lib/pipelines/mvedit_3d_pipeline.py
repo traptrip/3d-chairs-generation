@@ -634,7 +634,7 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
             patch_rgb_weight, patch_normal_weight, alpha_soften, normal_reg_weight, entropy_weight,  # loss weights
             nerf_code, density_grid, density_bitfield,  # nerf model
             render_size, intrinsics, intrinsics_size, camera_poses, cam_weights, cam_lights, patch_size,  # cameras
-            is_init, bg_width, ambient_light, dt_gamma_scale, init_shaded):
+            is_init, bg_width, ambient_light, dt_gamma_scale, init_shaded, pbar=None):
         device = self.unet.device
         loss_tv = TVLoss(loss_weight=1.0, power=1.5)
         use_normal = tgt_normals is not None
@@ -787,6 +787,9 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                 optimizer.step()
 
                 torch.cuda.empty_cache()
+
+                if pbar:
+                    pbar.update(1)
 
             print_str = []
             for name, loss in zip([
@@ -1078,7 +1081,7 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                                'illustration, painting, drawing',
             bake_texture=True,
             map_size=1024,
-            prog_bar=tqdm):
+            pbar=tqdm):
         r"""
         Function invoked when calling the pipeline for generation.
 
@@ -1596,6 +1599,9 @@ class MVEdit3DPipeline(StableDiffusionControlNetPipeline):
                         latents = torch.cat([ref_latents, latents], dim=2)
                     latents = self.scheduler.add_noise(latents, torch.randn_like(
                         latents[0]).expand(latents.size(0), -1, -1, -1), timesteps[0:1])
+                    
+            if pbar:
+                pbar.update(1)
 
         # ================= Save results =================
         out_mesh = self.mesh_renderer.bake_xyz_shading_fun(
