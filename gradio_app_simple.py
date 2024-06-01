@@ -1,4 +1,5 @@
 import os
+import gc
 import random
 import sys
 from functools import partial
@@ -6,6 +7,7 @@ import shutil
 import os.path as osp
 import argparse
 from collections import OrderedDict
+from pathlib import Path
 
 sys.path.append(os.path.abspath(os.path.join(__file__, "../")))
 if "OMP_NUM_THREADS" not in os.environ:
@@ -183,7 +185,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    cache_dir = "./"
+    cache_dir = "./gradio_cached_examples"
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
     if args.empty_cache:
         if osp.exists("./gradio_cached_examples"):
@@ -192,6 +195,8 @@ def main():
             os.environ["GRADIO_TEMP_DIR"]
         ):
             shutil.rmtree(os.environ["GRADIO_TEMP_DIR"])
+
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
     torch.set_grad_enabled(False)
     runner = MVEditRunner(
@@ -211,7 +216,7 @@ def main():
         image = runner.run_segmentation(image)
         return image
 
-    def image_to_3d(seed, image, cache_dir="."):
+    def image_to_3d(seed, image):
         if isinstance(image, np.ndarray):
             image = Image.fromarray(image)
         pbar = gr.Progress().tqdm(None, total=6 + 13)
@@ -225,6 +230,19 @@ def main():
             cache_dir=cache_dir,
             pbar=pbar,
         )
+        runner = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        runner = MVEditRunner(
+            device=torch.device("cuda"),
+            local_files_only=args.local_files_only,
+            unload_models=args.unload_models,
+            out_dir=osp.join(osp.dirname(__file__), "viz") if args.debug else None,
+            save_interval=1 if args.debug else None,
+            debug=args.debug,
+            no_safe=args.no_safe,
+        )
+
         return mesh_path
 
     with gr.Blocks(
@@ -278,6 +296,7 @@ def main():
             fn=image_to_3d,
             inputs=[seed, image_output],
             outputs=model_output,
+            show_progress=False,
         )
 
         # btn_3d_to_video.click(
