@@ -1,0 +1,2 @@
+tinycudann @ git+https://github.com/NVlabs/tiny-cuda-nn/@2ec562e853e6f482b5d09168705205f46358fb39#subdirectory=bindings/torch
+nvdiffrast @ git+https://github.com/NVlabs/nvdiffrast.git@c5caf7bdb8a2448acc491a9faa47753972edd380

@@ -5,18 +5,17 @@ import shutil
 import math
 import uuid
 import json
+
 from pathlib import Path
 import numpy as np
 import torch
 import diffusers
 import gradio as gr
-import mmcv
 from copy import copy
 from functools import partial
 from videoio import VideoWriter
-from scipy.stats import vonmises
 from PIL import Image, ImageOps
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor
+from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers import (
     EulerAncestralDiscreteScheduler,
     AutoencoderKL,
@@ -24,15 +23,12 @@ from diffusers import (
     ControlNetModel,
     StableDiffusionPipeline,
 )
-from diffusers.pipelines.stable_diffusion.safety_checker import (
-    StableDiffusionSafetyChecker,
-)
-from omnidata_modules.midas.dpt_depth import DPTDepthModel
 from segment_anything import sam_model_registry, SamPredictor
 from mmcv.runner import set_random_seed
 from mmcv.runner.checkpoint import _load_checkpoint
 from huggingface_hub import hf_hub_download
-from .inference import init_model
+
+from omnidata_modules.midas.dpt_depth import DPTDepthModel
 from lib.core.utils.camera_utils import (
     get_pose_from_angles,
     random_surround_views,
@@ -44,24 +40,15 @@ from lib.core.utils.pose_estimation import (
     elev_estimation,
     pose5dof_estimation,
 )
-from lib.core.mvedit_webui.parameters import (
-    parse_3d_args,
-    parse_2d_args,
-    parse_retex_args,
-    parse_stablessdnerf_args,
-)
+from lib.core.webui.parameters import parse_3d_args, parse_2d_args
 from lib.models.architecture.ip_adapter import IPAdapter
 from lib.models.autoencoders.base_mesh import Mesh, preprocess_mesh
 from lib.pipelines import (
-    MVEdit3DPipeline,
-    MVEditTextureSuperResPipeline,
-    MVEditTexturePipeline,
+    ThreeDPipeline,
+    TextureSuperResPipeline,
     Zero123PlusPipeline,
 )
-from lib.pipelines.mvedit_3d_pipeline import default_max_num_views
-from lib.pipelines.mvedit_texture_pipeline import (
-    default_max_num_views as default_max_num_views_texture,
-)
+from lib.pipelines.three_d_pipeline import default_max_num_views
 from lib.pipelines.utils import (
     init_common_modules,
     rgba_to_rgb,
@@ -71,7 +58,6 @@ from lib.pipelines.utils import (
     join_prompts,
     zero123plus_postprocess,
 )
-from lib.models.autoencoders.base_nerf import IdentityCode
 
 
 def _api_wrapper(func):
@@ -88,7 +74,7 @@ def _api_wrapper(func):
     return wrapper
 
 
-class MVEditRunner:
+class Runner:
     def __init__(
         self,
         device,
@@ -98,7 +84,6 @@ class MVEditRunner:
         out_dir=None,
         save_interval=None,
         debug=False,
-        no_safe=False,
     ):
         self.local_files_only = local_files_only
         self.empty_cache = empty_cache
@@ -114,7 +99,6 @@ class MVEditRunner:
 
         print("\nInitializing modules...")
         self.device = device
-        self.no_safe = no_safe
         (
             self.image_enhancer,
             self.mesh_renderer,
@@ -249,36 +233,6 @@ class MVEditRunner:
 
         gc.collect()
         torch.cuda.empty_cache()
-
-    def load_stablessdnerf(self):
-        if self.stablessdnerf is None:
-            print("\nLoading StableSSDNeRF...")
-            config = mmcv.Config.fromfile("configs/sd/stablessdnerf_cars_lpips.py")
-            config.model.decoder.max_steps = 1024
-            config.model.decoder.weight_culling_th = 0.001
-            config.model.grid_size = 64
-            config.model.pixel_loss = dict(type="L1LossMod", loss_weight=1.2)
-            config.model.patch_loss = dict(type="LPIPSLoss", loss_weight=1.2, net="vgg")
-            config.model.patch_size = 128
-            config.model.decoder.type = "TriPlaneiNGPDecoder"
-            stablessdnerf = init_model(
-                config,
-                checkpoint="huggingface://Lakonik/stablessdnerf/stablessdnerf_cars_40k_emaonly.bin",
-                device=torch.device("cuda"),
-            )
-            stablessdnerf.diffusion_ema.to(torch.float16)
-            stablessdnerf.eval()
-            self.stablessdnerf = stablessdnerf
-            print("StableSSDNeRF loaded.")
-            gc.collect()
-
-    def unload_stablessdnerf(self):
-        if self.stablessdnerf is not None:
-            print("\nUnloading StableSSDNeRF...")
-            self.stablessdnerf = None
-            print("StableSSDNeRF unloaded.")
-            gc.collect()
-            torch.cuda.empty_cache()
 
     def load_controlnet_ip2p(self):
         if self.controlnet_ip2p is None:
@@ -786,91 +740,6 @@ class MVEditRunner:
         )
         return out_mesh
 
-    def proc_retex(
-        self,
-        pipe,
-        seed,
-        retex_kwargs,
-        superres_kwargs,
-        in_image=None,
-        front_azi=None,
-        in_model=None,
-        extra_control_images=None,
-        camera_poses=None,
-        aux_camera_poses=None,
-        intrinsics=None,
-        intrinsics_size=None,
-        cam_weights=None,
-        keep_views=None,
-        ip_adapter=None,
-        use_reference=False,
-    ):
-        print(retex_kwargs)
-        if self.out_dir_3d is not None:
-            if os.path.exists(self.out_dir_3d):
-                shutil.rmtree(self.out_dir_3d)
-            os.makedirs(self.out_dir_3d)
-        set_random_seed(seed, deterministic=True)
-        aux_len = len(aux_camera_poses) if aux_camera_poses is not None else 0
-        prompts = (
-            retex_kwargs["prompt"]
-            if front_azi is None
-            else [
-                join_prompts(retex_kwargs["prompt"], view_prompt)
-                for view_prompt in view_prompts(camera_poses, front_azi)
-                + ["view from above"] * aux_len
-            ]
-        )
-        camera_poses = (
-            camera_poses
-            if aux_camera_poses is None
-            else torch.cat([camera_poses, aux_camera_poses], dim=0)
-        )
-        out_mesh, ingp_states = pipe(
-            prompt=prompts,
-            negative_prompt=retex_kwargs["negative_prompt"],
-            in_model=in_model,
-            cond_images=(
-                [in_image] * len(camera_poses) if in_image is not None else None
-            ),
-            extra_control_images=extra_control_images,
-            camera_poses=camera_poses,
-            intrinsics=intrinsics,
-            intrinsics_size=intrinsics_size,
-            use_reference=use_reference,
-            guidance_scale=retex_kwargs["cfg_scale"],
-            num_inference_steps=retex_kwargs["steps"],
-            denoising_strength=(
-                None
-                if retex_kwargs["random_init"]
-                else retex_kwargs["denoising_strength"]
-            ),
-            patch_size=retex_kwargs["patch_size"],
-            patch_bs=retex_kwargs["patch_bs"],
-            diff_bs=retex_kwargs["diff_bs"],
-            render_bs=retex_kwargs["render_bs"],
-            n_inverse_steps=retex_kwargs["n_inverse_steps"],
-            init_inverse_steps=retex_kwargs["init_inverse_steps"],
-            ip_adapter=ip_adapter,
-            cam_weights=cam_weights,
-            keep_views=keep_views,
-            default_prompt=retex_kwargs["aux_prompt"],
-            default_neg_prompt=retex_kwargs["aux_negative_prompt"],
-            lr_schedule=lambda p: retex_kwargs["start_lr"]
-            + (retex_kwargs["end_lr"] - retex_kwargs["start_lr"]) * p,
-            bake_texture=not superres_kwargs["do_superres"],
-            prog_bar=gr.Progress().tqdm,
-            out_dir=self.out_dir_tex,
-            save_interval=self.save_interval,
-            save_all_interval=self.save_interval,
-            force_auto_uv=retex_kwargs["force_auto_uv"],
-            max_num_views=partial(
-                default_max_num_views_texture, start_num=retex_kwargs["max_num_views"]
-            ),
-            debug=self.debug,
-        )
-        return out_mesh, ingp_states
-
     @_api_wrapper
     def run_mesh_preproc(self, in_mesh, *args, cache_dir=None, render_bs=8):
         if self.empty_cache:
@@ -1052,11 +921,6 @@ class MVEditRunner:
     @_api_wrapper
     def run_segmentation(self, in_img):
         self.load_sam_predictor()
-        if self.unload_models:
-            self.unload_stablessdnerf()
-            self.unload_controlnet_ip2p()
-        if self.empty_cache:
-            torch.cuda.empty_cache()
         in_img_np = np.asarray(in_img)
         if in_img_np.shape[-1] == 4 and np.any(in_img_np[..., 3] != 255):
             in_img = in_img_np
@@ -1067,17 +931,16 @@ class MVEditRunner:
                 sam_predictor=self.predictor,
                 to_np=True,
             )[0]
-        self.unload_sam_predictor()
+        if self.unload_models:
+            self.unload_sam_predictor()
+            self.unload_controlnet_ip2p()
+        if self.empty_cache:
+            torch.cuda.empty_cache()
         return Image.fromarray(in_img)
 
     @_api_wrapper
     def run_zero123plus(self, seed, in_img, pbar):
         self.load_zero123plus_pipeline("sudo-ai/zero123plus-v1.1")
-        if self.unload_models:
-            self.unload_stablessdnerf()
-            self.unload_controlnet_ip2p()
-        if self.empty_cache:
-            torch.cuda.empty_cache()
         in_img = pad_rgba_image(np.asarray(in_img), ratio=self.zero123plus_pad_ratio)
         print(f"\nRunning Zero123++ generation with seed {seed}...")
         init_images = self.proc_zero123plus(
@@ -1088,25 +951,28 @@ class MVEditRunner:
             pbar=pbar,
         )
         print("Zero123++ generation finished.")
-        self.unload_zero123plus_pipeline()
+        if self.unload_models:
+            self.unload_zero123plus_pipeline()
+            self.unload_controlnet_ip2p()
+        if self.empty_cache:
+            torch.cuda.empty_cache()
         return init_images
 
     @_api_wrapper
-    def run_zero123plus1_2(self, seed, in_img):
+    def run_zero123plus1_2(self, seed, in_img, pbar):
         self.load_zero123plus_pipeline(
             "sudo-ai/zero123plus-v1.2",
             normal_controlnet="sudo-ai/controlnet-zp12-normal-gen-v1",
         )
+        in_img = pad_rgba_image(np.asarray(in_img), ratio=self.zero123plus1_2_pad_ratio)
+        print(f"\nRunning Zero123++ generation with seed {seed}...")
+        init_images = self.proc_zero123plus(seed, in_img, seg_padding=64, pbar=pbar)
+        print("Zero123++ generation finished.")
         if self.unload_models:
-            self.unload_stablessdnerf()
+            self.unload_zero123plus_pipeline()
             self.unload_controlnet_ip2p()
         if self.empty_cache:
             torch.cuda.empty_cache()
-        in_img = pad_rgba_image(np.asarray(in_img), ratio=self.zero123plus1_2_pad_ratio)
-        print(f"\nRunning Zero123++ generation with seed {seed}...")
-        init_images = self.proc_zero123plus(seed, in_img, seg_padding=64)
-        print("Zero123++ generation finished.")
-        self.unload_zero123plus_pipeline()
         return init_images
 
     @_api_wrapper
@@ -1123,7 +989,7 @@ class MVEditRunner:
         self.load_scheduler(
             nerf_mesh_kwargs["checkpoint"], nerf_mesh_kwargs["scheduler"]
         )
-        pipe = MVEdit3DPipeline(
+        pipe = ThreeDPipeline(
             vae=self.vae,
             text_encoder=self.text_encoder,
             tokenizer=self.tokenizer,
@@ -1138,12 +1004,6 @@ class MVEditRunner:
             tonemapping=self.tonemapping,
         )
         self.load_ip_adapter(pipe)
-        if self.unload_models:
-            self.unload_stablessdnerf()
-            self.unload_controlnet_ip2p()
-        if self.empty_cache:
-            torch.cuda.empty_cache()
-
         print(f"\nRunning Zero123++ to mesh with seed {seed}...")
 
         in_img = pad_rgba_image(
@@ -1206,7 +1066,7 @@ class MVEditRunner:
             self.load_scheduler(
                 superres_kwargs["checkpoint"], superres_kwargs["scheduler"]
             )
-            pipe = MVEditTextureSuperResPipeline(
+            pipe = TextureSuperResPipeline(
                 vae=self.vae,
                 text_encoder=self.text_encoder,
                 tokenizer=self.tokenizer,
@@ -1248,15 +1108,21 @@ class MVEditRunner:
         out_mesh.write(out_path, flip_yz=True)
         print("Zero123++ to mesh finished.")
 
-        self.unload_normal_model()
-        self.unload_matcher()
-        self.unload_stable_diffusion()
-        self.unload_sam_predictor()
+        if self.unload_models:
+            self.unload_normal_model()
+            self.unload_matcher()
+            self.unload_stable_diffusion()
+            self.unload_sam_predictor()
+            self.unload_controlnet_ip2p()
+        if self.empty_cache:
+            torch.cuda.empty_cache()
 
         return out_path
 
     @_api_wrapper
-    def run_zero123plus1_2_to_mesh(self, seed, in_img, *args, cache_dir=None, **kwargs):
+    def run_zero123plus1_2_to_mesh(
+        self, seed, in_img, *args, cache_dir=None, pbar=None, **kwargs
+    ):
         nerf_mesh_kwargs, superres_kwargs, init_images = parse_3d_args(
             list(args), kwargs
         )
@@ -1271,7 +1137,7 @@ class MVEditRunner:
         self.load_scheduler(
             nerf_mesh_kwargs["checkpoint"], nerf_mesh_kwargs["scheduler"]
         )
-        pipe = MVEdit3DPipeline(
+        pipe = ThreeDPipeline(
             vae=self.vae,
             text_encoder=self.text_encoder,
             tokenizer=self.tokenizer,
@@ -1286,12 +1152,6 @@ class MVEditRunner:
             tonemapping=self.tonemapping,
         )
         self.load_ip_adapter(pipe)
-        if self.unload_models:
-            self.unload_stablessdnerf()
-            self.unload_controlnet_ip2p()
-        if self.empty_cache:
-            torch.cuda.empty_cache()
-
         print(f"\nRunning Zero123++ to mesh with seed {seed}...")
 
         in_img = pad_rgba_image(np.asarray(np.asarray(in_img)), ratio=0.9)
@@ -1346,6 +1206,7 @@ class MVEditRunner:
             ip_adapter=self.ip_adapter,
             use_reference=True,
             use_normal=True,
+            pbar=pbar,
         )
 
         if superres_kwargs["do_superres"]:
@@ -1353,7 +1214,7 @@ class MVEditRunner:
             self.load_scheduler(
                 superres_kwargs["checkpoint"], superres_kwargs["scheduler"]
             )
-            pipe = MVEditTextureSuperResPipeline(
+            pipe = TextureSuperResPipeline(
                 vae=self.vae,
                 text_encoder=self.text_encoder,
                 tokenizer=self.tokenizer,
@@ -1395,149 +1256,15 @@ class MVEditRunner:
         out_mesh.write(out_path, flip_yz=True)
         print("Zero123++ to mesh finished.")
 
-        self.unload_normal_model()
-        self.unload_matcher()
-        self.unload_stable_diffusion()
-        self.unload_sam_predictor()
-
-        return out_path
-
-    @_api_wrapper
-    def run_3d_to_3d(
-        self,
-        seed,
-        proc_dict,
-        front_view_id,
-        *args,
-        cache_dir=None,
-        instruct=False,
-        **kwargs,
-    ):
-        if isinstance(front_view_id, str):
-            front_view_id = None
-        nerf_mesh_kwargs, superres_kwargs, _ = parse_3d_args(list(args), kwargs)
-        proc_dict = json.loads(proc_dict)
-        mesh_path = proc_dict["mesh_path"]
-
-        self.load_stable_diffusion(nerf_mesh_kwargs["checkpoint"])
-        if instruct:
-            self.load_controlnet_ip2p()
-            controlnets = [self.controlnet, self.controlnet_depth, self.controlnet_ip2p]
-        else:
-            controlnets = [self.controlnet, self.controlnet_depth]
-        self.load_scheduler(
-            nerf_mesh_kwargs["checkpoint"], nerf_mesh_kwargs["scheduler"]
-        )
-        pipe = MVEdit3DPipeline(
-            vae=self.vae,
-            text_encoder=self.text_encoder,
-            tokenizer=self.tokenizer,
-            unet=self.unet,
-            controlnet=controlnets,
-            scheduler=self.scheduler,
-            nerf=self.nerf,
-            mesh_renderer=self.mesh_renderer,
-            image_enhancer=self.image_enhancer,
-            segmentation=self.segmentation,
-            normal_model=None,
-            tonemapping=self.tonemapping,
-        )
-        self.unload_ip_adapter(pipe)
         if self.unload_models:
-            self.unload_stablessdnerf()
-            if not instruct:
-                self.unload_controlnet_ip2p()
             self.unload_normal_model()
-            self.unload_sam_predictor()
-            self.unload_zero123plus_pipeline()
             self.unload_matcher()
+            self.unload_stable_diffusion()
+            self.unload_sam_predictor()
+            self.unload_controlnet_ip2p()
         if self.empty_cache:
             torch.cuda.empty_cache()
 
-        mode = "instruct" if instruct else "text-guided"
-        print(f"\nRunning {mode} 3D-to-3D with seed {seed}...")
-        set_random_seed(seed, deterministic=True)
-        camera_poses = random_surround_views(
-            self.proc_3d_to_3d_camera_distance,
-            nerf_mesh_kwargs["max_num_views"],
-            self.proc_3d_to_3d_min_elev,
-            self.proc_3d_to_3d_max_elev,
-            use_linspace=True,
-        )[:, :3].to(self.device)
-        focal = 512 / (2 * np.tan(np.radians(self.proc_3d_to_3d_fov / 2)))
-        intrinsics = torch.tensor(
-            [focal, focal, 256, 256], dtype=torch.float32, device=self.device
-        )
-
-        if front_view_id is not None and 0 <= front_view_id < self.preproc_num_views:
-            front_azi = front_view_id / self.preproc_num_views * (2 * math.pi)
-            camera_azi = torch.atan2(camera_poses[:, 1, 3], camera_poses[:, 0, 3])
-            cam_weights = (
-                vonmises.pdf(front_azi, 0.3, camera_azi.cpu().numpy()) * (2 * math.pi)
-            ).tolist()
-            print(f"\nUsing front view id {front_view_id}...")
-            print(f"Using camera weights: {cam_weights}")
-        else:
-            front_azi = cam_weights = None
-
-        out_mesh, ingp_states = self.proc_nerf_mesh(
-            pipe,
-            seed,
-            nerf_mesh_kwargs,
-            superres_kwargs,
-            front_azi=front_azi,
-            cam_weights=cam_weights,
-            in_model=mesh_path,
-            camera_poses=camera_poses,
-            intrinsics=intrinsics,
-            intrinsics_size=512,
-            seg_padding=80,
-        )
-
-        if superres_kwargs["do_superres"]:
-            self.load_stable_diffusion(superres_kwargs["checkpoint"])
-            self.load_scheduler(
-                superres_kwargs["checkpoint"], superres_kwargs["scheduler"]
-            )
-            pipe = MVEditTextureSuperResPipeline(
-                vae=self.vae,
-                text_encoder=self.text_encoder,
-                tokenizer=self.tokenizer,
-                unet=self.unet,
-                controlnet=[self.controlnet, self.controlnet_depth],
-                scheduler=self.scheduler,
-                nerf=self.nerf,
-                mesh_renderer=self.mesh_renderer,
-            )
-            self.load_ip_adapter(pipe)
-            if self.empty_cache:
-                torch.cuda.empty_cache()
-            out_mesh = self.proc_texture_superres(
-                pipe,
-                seed + 1 if seed < 2**31 else 0,
-                out_mesh,
-                ingp_states,
-                nerf_mesh_kwargs,
-                superres_kwargs,
-                front_azi=front_azi,
-                camera_distance=self.proc_3d_to_3d_camera_distance,
-                fov=self.proc_3d_to_3d_fov,
-                num_cameras=6,
-                min_elev=self.proc_3d_to_3d_tex_min_elev,
-                max_elev=self.proc_3d_to_3d_tex_max_elev,
-                begin_rad=front_azi,
-                reg_cam_weights=[0.25, 0.25],
-            )
-
-        if "center" in proc_dict and "scale" in proc_dict:
-            out_mesh.v = out_mesh.v / proc_dict["scale"] + out_mesh.v.new_tensor(
-                proc_dict["center"]
-            )
-
-        out_path = osp.join(cache_dir, f"output_{uuid.uuid4()}.glb")
-        out_mesh.write(out_path, flip_yz=True)
-        mode = "Instruct" if instruct else "Text-guided"
-        print(f"{mode} 3D-to-3D finished.")
         return out_path
 
     @_api_wrapper
@@ -1557,11 +1284,6 @@ class MVEditRunner:
             requires_safety_checker=False,
         )
         self.unload_ip_adapter(pipe)
-        if self.unload_models:
-            self.unload_stablessdnerf()
-            self.unload_controlnet_ip2p()
-        if self.empty_cache:
-            torch.cuda.empty_cache()
 
         print(f"\nRunning text-to-image with seed {seed}...")
         set_random_seed(seed, deterministic=True)
@@ -1577,165 +1299,12 @@ class MVEditRunner:
             return_dict=False,
         )[0][0]
         print("Text-to-Image finished.")
-        self.unload_stable_diffusion()
-        return out_img
-
-    @_api_wrapper
-    def run_retex(
-        self,
-        seed,
-        proc_dict,
-        front_view_id,
-        *args,
-        cache_dir=None,
-        instruct=False,
-        **kwargs,
-    ):
-        if isinstance(front_view_id, str):
-            front_view_id = None
-        torch.set_grad_enabled(False)
-        retex_kwargs, superres_kwargs, in_image = parse_retex_args(list(args), kwargs)
-        proc_dict = json.loads(proc_dict)
-        mesh_path = proc_dict["mesh_path"]
-
-        self.load_stable_diffusion(retex_kwargs["checkpoint"])
-        if instruct:
-            self.load_controlnet_ip2p()
-            controlnets = [self.controlnet, self.controlnet_depth, self.controlnet_ip2p]
-        else:
-            controlnets = [self.controlnet, self.controlnet_depth]
-        self.load_scheduler(retex_kwargs["checkpoint"], retex_kwargs["scheduler"])
-        pipe = MVEditTexturePipeline(
-            vae=self.vae,
-            text_encoder=self.text_encoder,
-            tokenizer=self.tokenizer,
-            unet=self.unet,
-            controlnet=controlnets,
-            scheduler=self.scheduler,
-            nerf=self.nerf,
-            mesh_renderer=self.mesh_renderer,
-        )
-        if isinstance(in_image, Image.Image) and np.asarray(in_image).size > 0:
-            self.load_ip_adapter(pipe)
-            width, height = in_image.size
-            in_image_size = min(width, height)
-            left = (width - in_image_size) // 2
-            top = (height - in_image_size) // 2
-            in_image = in_image.crop(
-                (left, top, left + in_image_size, top + in_image_size)
-            )
-        else:
-            self.unload_ip_adapter(pipe)
-            in_image = None
         if self.unload_models:
-            self.unload_stablessdnerf()
-            if not instruct:
-                self.unload_controlnet_ip2p()
-            self.unload_normal_model()
-            self.unload_sam_predictor()
-            self.unload_zero123plus_pipeline()
-            self.unload_matcher()
+            self.unload_stable_diffusion()
+            self.unload_controlnet_ip2p()
         if self.empty_cache:
             torch.cuda.empty_cache()
-
-        mode = "instruct" if instruct else "text-guided"
-        print(f"\nRunning {mode} re-texturing with seed {seed}...")
-        if front_view_id is not None and 0 <= front_view_id < self.preproc_num_views:
-            front_azi = front_view_id / self.preproc_num_views * (2 * math.pi)
-            print(f"\nUsing front view id {front_view_id}...")
-        else:
-            front_azi = None
-
-        set_random_seed(seed, deterministic=True)
-        camera_poses = random_surround_views(
-            self.proc_3d_to_3d_camera_distance,
-            retex_kwargs["max_num_views"],
-            self.proc_retex_min_elev,
-            self.proc_retex_max_elev,
-            use_linspace=True,
-            begin_rad=front_azi if front_azi is not None else 0,
-        )[:, :3].to(self.device)
-        if front_azi is not None:
-            cam_weights = [2.0] + [1.0] * retex_kwargs["max_num_views"]  # including aux
-            aux_camera_poses = torch.from_numpy(
-                get_pose_from_angles_np(
-                    np.array([front_azi], dtype=np.float32),
-                    np.array([0.6], dtype=np.float32),
-                    np.array([self.proc_3d_to_3d_camera_distance], dtype=np.float32),
-                )
-            )[:, :3].to(self.device)
-            keep_views = [0, retex_kwargs["max_num_views"]]
-        else:
-            cam_weights = aux_camera_poses = None
-            keep_views = None
-        focal = 512 / (2 * np.tan(np.radians(self.proc_3d_to_3d_fov / 2)))
-        intrinsics = torch.tensor(
-            [focal, focal, 256, 256], dtype=torch.float32, device=self.device
-        )
-
-        out_mesh, ingp_states = self.proc_retex(
-            pipe,
-            seed,
-            retex_kwargs,
-            superres_kwargs,
-            in_image=in_image,
-            front_azi=front_azi,
-            cam_weights=cam_weights,
-            in_model=mesh_path,
-            camera_poses=camera_poses,
-            aux_camera_poses=aux_camera_poses,
-            intrinsics=intrinsics,
-            intrinsics_size=512,
-            keep_views=keep_views,
-            ip_adapter=self.ip_adapter if in_image is not None else None,
-            use_reference=in_image is not None,
-        )
-
-        if superres_kwargs["do_superres"]:
-            self.load_stable_diffusion(superres_kwargs["checkpoint"])
-            self.load_scheduler(
-                superres_kwargs["checkpoint"], superres_kwargs["scheduler"]
-            )
-            pipe = MVEditTextureSuperResPipeline(
-                vae=self.vae,
-                text_encoder=self.text_encoder,
-                tokenizer=self.tokenizer,
-                unet=self.unet,
-                controlnet=[self.controlnet, self.controlnet_depth],
-                scheduler=self.scheduler,
-                nerf=self.nerf,
-                mesh_renderer=self.mesh_renderer,
-            )
-            self.load_ip_adapter(pipe)
-            if self.empty_cache:
-                torch.cuda.empty_cache()
-            out_mesh = self.proc_texture_superres(
-                pipe,
-                seed + 1 if seed < 2**31 else 0,
-                out_mesh,
-                ingp_states,
-                retex_kwargs,
-                superres_kwargs,
-                front_azi=front_azi,
-                camera_distance=self.proc_3d_to_3d_camera_distance,
-                fov=self.proc_3d_to_3d_fov,
-                num_cameras=6,
-                min_elev=self.proc_3d_to_3d_tex_min_elev,
-                max_elev=self.proc_3d_to_3d_tex_max_elev,
-                begin_rad=front_azi,
-                reg_cam_weights=[0.25, 0.25],
-            )
-
-        if "center" in proc_dict and "scale" in proc_dict:
-            out_mesh.v = out_mesh.v / proc_dict["scale"] + out_mesh.v.new_tensor(
-                proc_dict["center"]
-            )
-
-        out_path = osp.join(cache_dir, f"output_{uuid.uuid4()}.glb")
-        out_mesh.write(out_path, flip_yz=True)
-        mode = "Instruct" if instruct else "Text-guided"
-        print(f"{mode} re-texturing finished.")
-        return out_path
+        return out_img
 
     @_api_wrapper
     def run_video(
@@ -1816,241 +1385,4 @@ class MVEditRunner:
                 writer.write(image_single)
         writer.close()
 
-        return out_path
-
-    @_api_wrapper
-    def run_stablessdnerf(self, seed, *args, cache_dir=None, **kwargs):
-        stablessdnerf_kwargs = parse_stablessdnerf_args(list(args), kwargs)
-
-        self.load_stablessdnerf()
-
-        stablessdnerf = copy(self.stablessdnerf)
-        stablessdnerf._modules = copy(stablessdnerf._modules)
-        stablessdnerf.diffusion_ema = copy(stablessdnerf.diffusion_ema)
-        stablessdnerf.diffusion_ema.sample_method = stablessdnerf_kwargs["scheduler"]
-        stablessdnerf.diffusion_ema.test_cfg = copy(
-            stablessdnerf.diffusion_ema.test_cfg
-        )
-        stablessdnerf.diffusion_ema.test_cfg["num_timesteps"] = stablessdnerf_kwargs[
-            "steps"
-        ]
-        stablessdnerf.diffusion_ema.test_cfg["cfg_scale"] = stablessdnerf_kwargs[
-            "cfg_scale"
-        ]
-        if self.unload_models:
-            self.unload_controlnet_ip2p()
-            self.unload_normal_model()
-            self.unload_sam_predictor()
-            self.unload_zero123plus_pipeline()
-            self.unload_matcher()
-        if self.empty_cache:
-            torch.cuda.empty_cache()
-
-        print(f"\nRunning StableSSDNeRF with seed {seed}...")
-        set_random_seed(seed, deterministic=True)
-
-        noise = torch.randn((1,) + stablessdnerf.code_size)
-        data = dict(
-            noise=noise.to(self.device),
-            scene_id=[0],
-            scene_name=["data"],
-            prompts=[stablessdnerf_kwargs["prompt"]],
-            neg_prompts=[stablessdnerf_kwargs["negative_prompt"]],
-        )
-        code, density_grid, density_bitfield = stablessdnerf.val_text(
-            data, show_pbar=True, save_intermediates=False
-        )
-        triplane = stablessdnerf.decoder_ema.preproc(code.float())
-
-        stablessdnerf.code_activation = IdentityCode()
-        stablessdnerf.decoder_ema = copy(stablessdnerf.decoder_ema)
-        stablessdnerf.decoder_ema._modules = copy(stablessdnerf.decoder_ema._modules)
-        stablessdnerf.decoder_ema.preprocessor = None
-
-        print("StableSSDNeRF finished.")
-
-        # render preview video
-        camera_poses = random_surround_views(
-            self.ssdnerf_camera_distance,
-            120,
-            0.2,
-            0.2,
-            use_linspace=True,
-            begin_rad=self.ssdnerf_front_azi,
-        )[:, :3].to(self.device)
-        focal = self.ssdnerf_render_size / (
-            2 * np.tan(np.radians(self.ssdnerf_fov / 2))
-        )
-        intrinsics = torch.tensor(
-            [focal, focal, self.ssdnerf_render_size / 2, self.ssdnerf_render_size / 2],
-            dtype=torch.float32,
-            device=self.device,
-        )
-
-        out_video_path = osp.join(cache_dir, f"video_{uuid.uuid4()}.mp4")
-        out_triplane_path = osp.join(cache_dir, f"triplane_{uuid.uuid4()}.pt")
-        writer = VideoWriter(
-            out_video_path,
-            resolution=(self.ssdnerf_render_size, self.ssdnerf_render_size),
-            lossless=False,
-            fps=15,
-        )
-        for pose_batch in camera_poses.split(stablessdnerf_kwargs["render_bs"], dim=0):
-            image_batch, depth = stablessdnerf.render(
-                stablessdnerf.decoder_ema,
-                triplane,
-                density_bitfield,
-                self.ssdnerf_render_size,
-                self.ssdnerf_render_size,
-                intrinsics[None, None].expand(-1, pose_batch.size(0), -1),
-                pose_batch[None],
-                cfg=dict(dt_gamma_scale=1.0),
-            )
-            image_batch = image_batch.squeeze(0)
-            image_batch = (
-                torch.round(image_batch.clamp(min=0, max=1) * 255)
-                .to(torch.uint8)
-                .cpu()
-                .numpy()
-            )
-            for image_single in image_batch:
-                writer.write(image_single)
-        writer.close()
-
-        torch.save(
-            dict(
-                triplane=triplane,
-                density_grid=density_grid,
-                density_bitfield=density_bitfield,
-            ),
-            out_triplane_path,
-        )
-        return out_video_path, out_triplane_path
-
-    @_api_wrapper
-    def run_stablessdnerf_to_mesh(
-        self, seed, triplane_path, *args, cache_dir=None, **kwargs
-    ):
-        in_triplane = torch.load(triplane_path, map_location=self.device)
-        nerf_mesh_kwargs, superres_kwargs, _ = parse_3d_args(list(args), kwargs)
-
-        self.load_stablessdnerf()
-
-        stablessdnerf = copy(self.stablessdnerf)
-        stablessdnerf._modules = copy(stablessdnerf._modules)
-        stablessdnerf.decoder_ema = copy(stablessdnerf.decoder_ema)
-        stablessdnerf.decoder_ema._modules = copy(stablessdnerf.decoder_ema._modules)
-        stablessdnerf.code_activation = IdentityCode()
-        stablessdnerf.decoder_ema.preprocessor = None
-        stablessdnerf.decoder_ema.use_dir_enc = False
-        stablessdnerf.decoder = stablessdnerf.decoder_ema
-
-        self.load_stable_diffusion(nerf_mesh_kwargs["checkpoint"])
-        controlnets = [self.controlnet, self.controlnet_depth]
-        self.load_scheduler(
-            nerf_mesh_kwargs["checkpoint"], nerf_mesh_kwargs["scheduler"]
-        )
-        pipe = MVEdit3DPipeline(
-            vae=self.vae,
-            text_encoder=self.text_encoder,
-            tokenizer=self.tokenizer,
-            unet=self.unet,
-            controlnet=controlnets,
-            scheduler=self.scheduler,
-            nerf=stablessdnerf,
-            mesh_renderer=self.mesh_renderer,
-            image_enhancer=self.image_enhancer,
-            segmentation=self.segmentation,
-            normal_model=None,
-            tonemapping=self.tonemapping,
-        )
-        self.unload_ip_adapter(pipe)
-        if self.unload_models:
-            self.unload_controlnet_ip2p()
-            self.unload_normal_model()
-            self.unload_sam_predictor()
-            self.unload_zero123plus_pipeline()
-            self.unload_matcher()
-        if self.empty_cache:
-            torch.cuda.empty_cache()
-
-        print(f"\nRunning StableSSDNeRF to mesh with seed {seed}...")
-        set_random_seed(seed, deterministic=True)
-        camera_poses = random_surround_views(
-            self.ssdnerf_camera_distance,
-            nerf_mesh_kwargs["max_num_views"],
-            self.ssdnerf_min_elev,
-            self.ssdnerf_max_elev,
-            use_linspace=True,
-        )[:, :3].to(self.device)
-        focal = self.ssdnerf_render_size / (
-            2 * np.tan(np.radians(self.ssdnerf_fov / 2))
-        )
-        intrinsics = torch.tensor(
-            [focal, focal, self.ssdnerf_render_size / 2, self.ssdnerf_render_size / 2],
-            dtype=torch.float32,
-            device=self.device,
-        )
-
-        def depth_p_weight(progress, warmup=0.1):
-            if isinstance(progress, torch.Tensor):
-                return progress.clamp(max=warmup) / warmup
-            else:
-                return min(progress, warmup) / warmup
-
-        out_mesh, ingp_states = self.proc_nerf_mesh(
-            pipe,
-            seed,
-            nerf_mesh_kwargs,
-            superres_kwargs,
-            nerf_code=in_triplane["triplane"],
-            density_grid=in_triplane["density_grid"],
-            density_bitfield=in_triplane["density_bitfield"],
-            front_azi=self.ssdnerf_front_azi,
-            camera_poses=camera_poses,
-            intrinsics=intrinsics,
-            intrinsics_size=self.ssdnerf_render_size,
-            seg_padding=80,
-            depth_p_weight=depth_p_weight,
-        )
-
-        if superres_kwargs["do_superres"]:
-            self.load_stable_diffusion(superres_kwargs["checkpoint"])
-            self.load_scheduler(
-                superres_kwargs["checkpoint"], superres_kwargs["scheduler"]
-            )
-            pipe = MVEditTextureSuperResPipeline(
-                vae=self.vae,
-                text_encoder=self.text_encoder,
-                tokenizer=self.tokenizer,
-                unet=self.unet,
-                controlnet=[self.controlnet, self.controlnet_depth],
-                scheduler=self.scheduler,
-                nerf=stablessdnerf,
-                mesh_renderer=self.mesh_renderer,
-            )
-            self.load_ip_adapter(pipe)
-            if self.empty_cache:
-                torch.cuda.empty_cache()
-            out_mesh = self.proc_texture_superres(
-                pipe,
-                seed + 1 if seed < 2**31 else 0,
-                out_mesh,
-                ingp_states,
-                nerf_mesh_kwargs,
-                superres_kwargs,
-                nerf_code=in_triplane["triplane"],
-                front_azi=self.ssdnerf_front_azi,
-                camera_distance=self.proc_3d_to_3d_camera_distance,
-                fov=self.proc_3d_to_3d_fov,
-                num_cameras=6,
-                min_elev=self.ssdnerf_tex_min_elev,
-                max_elev=self.ssdnerf_tex_max_elev,
-                begin_rad=self.ssdnerf_front_azi + math.pi / 2,
-                reg_cam_weights=[0.25, 0.25],
-            )
-
-        out_path = osp.join(cache_dir, f"output_{uuid.uuid4()}.glb")
-        out_mesh.write(out_path, flip_yz=True)
-        print(f"StableSSDNeRF to mesh finished.")
         return out_path

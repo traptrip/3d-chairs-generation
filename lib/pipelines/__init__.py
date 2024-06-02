@@ -1,7 +1,12 @@
-from .mvedit_3d_pipeline import MVEdit3DPipeline
-from .mvedit_texture_pipeline import MVEditTexturePipeline
-from .mvedit_texture_superres_pipeline import MVEditTextureSuperResPipeline
+from .three_d_pipeline import ThreeDPipeline
+from .texture_pipeline import TexturePipeline
+from .texture_superres_pipeline import TextureSuperResPipeline
 from .zero123plus import Zero123PlusPipeline
 
 
-__all__ = ['MVEdit3DPipeline', 'MVEditTexturePipeline', 'MVEditTextureSuperResPipeline', 'Zero123PlusPipeline']
+__all__ = [
+    "ThreeDPipeline",
+    "TexturePipeline",
+    "TextureSuperResPipeline",
+    "Zero123PlusPipeline",
+]

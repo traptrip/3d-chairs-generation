@@ -8,7 +8,6 @@ import torch.distributed
 
 from tqdm import tqdm
 from typing import Dict, Optional, Union, List, Tuple, Callable
-from PIL import Image
 from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers import (
     AutoencoderKL,
@@ -28,8 +27,8 @@ from lib.models.autoencoders.base_mesh import Mesh
 from lib.models.decoders.base_mesh_renderer import MeshRenderer
 from lib.models.architecture.ip_adapter import IPAdapter
 from lib.models.architecture.joint_attn import apply_cross_image_attn_proc
-from .mvedit_3d_pipeline import (
-    MVEdit3DPipeline,
+from .three_d_pipeline import (
+    ThreeDPipeline,
     join_prompts,
     default_tile_weight,
     default_depth_weight,
@@ -72,7 +71,7 @@ def camera_dense_weighting(intrinsics, intrinsics_size, render_size, alphas, dep
     return alphas_eroded * (-cos).clamp(min=0)
 
 
-class MVEditTexturePipeline(MVEdit3DPipeline):
+class TexturePipeline(ThreeDPipeline):
 
     _optional_components = []
 

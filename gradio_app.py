@@ -16,7 +16,7 @@ import torch
 import gradio as gr
 import numpy as np
 from PIL import Image
-from lib.core.mvedit_webui.gradio_custommodel3d import CustomModel3D
+from lib.core.webui.gradio_custommodel3d import CustomModel3D
 
 from lib.apis.runner import Runner
 
@@ -130,21 +130,12 @@ superres_defaults["n_inverse_steps"] = 80
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="MVEdit 3D Toolbox")
-    parser.add_argument("--diff-bs", type=int, default=4, help="Diffusion batch size")
+    parser = argparse.ArgumentParser(description="3D chairs generation app")
     parser.add_argument(
         "--advanced", action="store_true", help="Show advanced settings"
     )
     parser.add_argument(
         "--debug", action="store_true", help="Save debug images to ./viz"
-    )
-    parser.add_argument(
-        "--local-files-only",
-        action="store_true",
-        help="Only load local model weights and configuration files",
-    )
-    parser.add_argument(
-        "--no-safe", action="store_true", help="Disable safety checker to free VRAM"
     )
     parser.add_argument(
         "--empty-cache", action="store_true", help="Empty the cache directory"

@@ -24,8 +24,8 @@ from lib.models.autoencoders.base_mesh import Mesh
 from lib.models.decoders.base_mesh_renderer import MeshRenderer
 from lib.models.architecture.ip_adapter import IPAdapter
 from lib.models.architecture.joint_attn import apply_cross_image_attn_proc
-from .mvedit_texture_pipeline import (
-    MVEditTexturePipeline,
+from .texture_pipeline import (
+    TexturePipeline,
     default_depth_weight,
     join_prompts,
     default_blend_weight,
@@ -41,7 +41,7 @@ def default_tile_weight(t):
     return torch.ones_like(t)
 
 
-class MVEditTextureSuperResPipeline(MVEditTexturePipeline):
+class TextureSuperResPipeline(TexturePipeline):
 
     _optional_components = []
 
