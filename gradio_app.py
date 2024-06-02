@@ -1,9 +1,12 @@
 import os
+import gc
+import random
 import sys
-from functools import partial
 import shutil
 import os.path as osp
 import argparse
+from collections import OrderedDict
+from pathlib import Path
 
 sys.path.append(os.path.abspath(os.path.join(__file__, "../")))
 if "OMP_NUM_THREADS" not in os.environ:
@@ -11,14 +14,119 @@ if "OMP_NUM_THREADS" not in os.environ:
 
 import torch
 import gradio as gr
+import numpy as np
+from PIL import Image
+from lib.core.mvedit_webui.gradio_custommodel3d import CustomModel3D
 
-from lib.core.mvedit_webui.shared_opts import send_to_click
-from lib.core.mvedit_webui.tab_img_to_3d import create_interface_img_to_3d
-from lib.core.mvedit_webui.tab_text_to_img_to_3d import (
-    create_interface_text_to_img_to_3d,
+from lib.apis.runner import Runner
+
+image_defaults = OrderedDict(
+    [
+        ("width", 512),
+        ("height", 512),
+        ("prompt", None),
+        ("negative_prompt", None),
+        ("scheduler", None),
+        ("steps", None),
+        ("cfg_scale", 7),
+        ("checkpoint", "stabilityai/stable-diffusion-2-1-base"),
+        ("aux_prompt", "best quality, sharp focus, photorealistic, extremely detailed"),
+        (
+            "aux_negative_prompt",
+            "text, watermark, worst quality, low quality, depth of field, blurry, out of focus, low-res, "
+            "illustration, painting, drawing",
+        ),
+        ("adapter_ckpt", None),
+        ("adapter_filename", None),
+    ]
 )
-from lib.core.mvedit_webui.tab_3d_to_video import create_interface_3d_to_video
-from lib.apis.mvedit import MVEditRunner
+
+
+nerf_mesh_defaults = OrderedDict(
+    [
+        ("prompt", None),
+        ("negative_prompt", None),
+        ("scheduler", None),
+        ("steps", None),
+        ("denoising_strength", None),
+        ("random_init", None),
+        ("cfg_scale", 7),
+        ("checkpoint", "runwayml/stable-diffusion-v1-5"),
+        ("max_num_views", 32),
+        ("aux_prompt", "best quality, sharp focus, photorealistic, extremely detailed"),
+        (
+            "aux_negative_prompt",
+            "text, watermark, worst quality, low quality, depth of field, blurry, out of focus, low-res, "
+            "illustration, painting, drawing",
+        ),
+        ("diff_bs", None),
+        ("patch_size", 128),
+        ("patch_bs_nerf", 1),
+        ("render_bs", 6),
+        ("patch_bs", 8),
+        ("alpha_soften", 0.02),
+        ("normal_reg_weight", 4.0),
+        ("start_entropy_weight", 0.0),
+        ("end_entropy_weight", 4.0),
+        ("entropy_d", 0.015),
+        ("mesh_smoothness", 1.0),
+        ("n_inverse_steps", None),
+        ("init_inverse_steps", None),
+        ("tet_init_inverse_steps", 120),
+        ("start_lr", 0.01),
+        ("end_lr", 0.005),
+        ("tet_resolution", None),
+    ]
+)
+
+superres_defaults = OrderedDict(
+    [
+        ("do_superres", None),
+        ("scheduler", None),
+        ("steps", None),
+        ("denoising_strength", None),
+        ("random_init", None),
+        ("cfg_scale", 7),
+        ("checkpoint", "runwayml/stable-diffusion-v1-5"),
+        ("aux_prompt", "best quality, sharp focus, photorealistic, extremely detailed"),
+        (
+            "aux_negative_prompt",
+            "text, watermark, worst quality, low quality, depth of field, blurry, out of focus, low-res, "
+            "illustration, painting, drawing",
+        ),
+        ("patch_size", 512),
+        ("patch_bs", 1),
+        ("n_inverse_steps", None),
+        ("start_lr", 0.01),
+        ("end_lr", 0.01),
+    ]
+)
+
+image_defaults["scheduler"] = "DPMSolverMultistep"
+image_defaults["negative_prompt"] = "cheap, low-cost, aged, discounted"
+image_defaults["steps"] = 75
+image_defaults["adapter_ckpt"] = (
+    "/home/and/projects/itmo/diploma/sd_fine_tuning/sd-2-1-chairs-lora/checkpoint-4500"
+)
+image_defaults["adapter_filename"] = "model.safetensors"
+
+nerf_mesh_defaults["prompt"] = ""
+nerf_mesh_defaults["negative_prompt"] = ""
+nerf_mesh_defaults["scheduler"] = "DPMSolverMultistep"
+nerf_mesh_defaults["steps"] = 24
+nerf_mesh_defaults["denoising_strength"] = 0.5
+nerf_mesh_defaults["random_init"] = False
+nerf_mesh_defaults["diff_bs"] = 2
+nerf_mesh_defaults["n_inverse_steps"] = 80
+nerf_mesh_defaults["init_inverse_steps"] = 640
+nerf_mesh_defaults["tet_resolution"] = 128
+
+superres_defaults["do_superres"] = True
+superres_defaults["scheduler"] = "DPMSolverSDEKarras"
+superres_defaults["steps"] = 24
+superres_defaults["denoising_strength"] = 0.4
+superres_defaults["random_init"] = False
+superres_defaults["n_inverse_steps"] = 80
 
 
 def parse_args():
@@ -52,6 +160,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    default_seed = random.randint(0, 2**31)
+    cache_dir = "./gradio_cached_examples"
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
     if args.empty_cache:
         if osp.exists("./gradio_cached_examples"):
@@ -61,107 +172,117 @@ def main():
         ):
             shutil.rmtree(os.environ["GRADIO_TEMP_DIR"])
 
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
     torch.set_grad_enabled(False)
-    runner = MVEditRunner(
-        device=torch.device("cuda"),
-        local_files_only=args.local_files_only,
-        unload_models=args.unload_models,
-        out_dir=osp.join(osp.dirname(__file__), "viz") if args.debug else None,
-        save_interval=1 if args.debug else None,
-        debug=args.debug,
-        no_safe=args.no_safe,
-    )
+
+    def text_to_image(seed, prompt, negative_prompt):
+        runner = Runner(
+            device=torch.device("cuda"),
+            unload_models=args.unload_models,
+            out_dir=osp.join(osp.dirname(__file__), "viz") if args.debug else None,
+            save_interval=1 if args.debug else None,
+            debug=args.debug,
+        )
+        image_defaults["prompt"] = prompt
+        image_defaults["negative_prompt"] = negative_prompt
+        image = runner.run_text_to_img(seed, *image_defaults.values())
+        image = runner.run_segmentation(image)
+        runner = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        return image
+
+    def image_to_3d(seed, image):
+        runner = Runner(
+            device=torch.device("cuda"),
+            unload_models=args.unload_models,
+            out_dir=osp.join(osp.dirname(__file__), "viz") if args.debug else None,
+            save_interval=1 if args.debug else None,
+            debug=args.debug,
+        )
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(image)
+        pbar = gr.Progress().tqdm(None, total=6 + 13)
+        mv_images = runner.run_zero123plus(seed, image, pbar=pbar)
+        mesh_path = runner.run_zero123plus_to_mesh(
+            seed,
+            image.convert("RGBA"),
+            *nerf_mesh_defaults.values(),
+            *{f"superres_{k}": v for k, v in superres_defaults.items()}.values(),
+            *[np.asarray(Image.fromarray(img).convert("RGBA")) for img in mv_images],
+            cache_dir=cache_dir,
+            pbar=pbar,
+        )
+        runner = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        return mesh_path
 
     with gr.Blocks(
         analytics_enabled=False,
-        title="3D scene generation",
-        css="lib/web/style.css",
-    ) as demo:
-        md_txt = "# 3D Chairs generation toolbox"
-        if not args.advanced:
-            md_txt += "<br>**Advanced settings** are disabled. Deploy the app with `--advanced` to enable them."
+        title="3D chairs generation",
+        theme=gr.themes.Base(),
+    ) as interface:
+        md_txt = "# 3D Chairs generation demo app"
         gr.Markdown(md_txt)
-
-        with gr.Tabs(selected="tab_img_to_3d") as main_tabs:
-            with gr.TabItem("Text-to-Image-to-3D", id="tab_text_to_img_to_3d"):
-                _, var_text_to_img_to_3d = create_interface_text_to_img_to_3d(
-                    runner.run_text_to_img,
-                    examples=[
-                        [768, 512, "a wooden carving of a wise old turtle", ""],
-                        [512, 512, "a glowing robotic unicorn, full body", ""],
-                        [512, 512, "a ceramic mug shaped like a smiling cat", ""],
-                    ],
-                    advanced=args.advanced,
+        with gr.Row():
+            with gr.Column():
+                prompt = gr.Textbox(label="Prompt", placeholder="Prompt")
+                negative_prompt = gr.Textbox(
+                    label="Negative Prompt", placeholder="Negative Prompt"
                 )
-            with gr.TabItem("Image-to-3D", id="tab_img_to_3d"):
-                _, var_img_to_3d_1_1 = create_interface_img_to_3d(
-                    runner.run_segmentation,
-                    runner.run_zero123plus,
-                    runner.run_zero123plus_to_mesh,
-                    api_names=[
-                        "image_segmentation",
-                        "img_to_3d_1_1_zero123plus",
-                        "img_to_3d_1_1_zero123plus_to_mesh",
-                    ],
-                    init_inverse_steps=640,
-                    n_inverse_steps=80,
-                    diff_bs=args.diff_bs,
-                    advanced=args.advanced,
+                seed = gr.Number(
+                    label="Seed",
+                    value=default_seed,
+                    min_width=100,
+                    precision=0,
+                    minimum=0,
+                    maximum=2**31,
+                    interactive=True,
                 )
-            with gr.TabItem("Tools", id="tab_tools"):
-                with gr.Tabs() as sub_tabs_tools:
-                    with gr.TabItem("Export Video", id="tab_export_video"):
-                        _, var_3d_to_video = create_interface_3d_to_video(
-                            runner.run_mesh_preproc,
-                            runner.run_video,
-                            api_names=[False, "3d_to_video"],
-                        )
+                btn_text_to_image = gr.Button("RUN text to image")
+                btn_image_to_3d = gr.Button("RUN image to 3D")
+                btn_generate_all = gr.Button("Generate ALL", variant="primary")
 
-        for var_dict in [var_img_to_3d_1_1]:
-            instruct = var_dict.get("instruct", False)
-            in_fields = (
-                ["output"] if instruct else ["output", "prompt", "negative_prompt"]
-            )
-            out_fields = (
-                ["in_mesh"] if instruct else ["in_mesh", "prompt", "negative_prompt"]
-            )
+            with gr.Column():
+                image_output = gr.Image(label="Image", image_mode="RGBA", height=350)
+                model_output = CustomModel3D(
+                    height=350,
+                    label="3D model",
+                    camera_position=(180, 80, 3.0),
+                    interactive=False,
+                )
 
-            if "export_video" in var_dict:
-                var_dict["export_video"].click(
-                    fn=partial(
-                        send_to_click, target_tab_ids=["tab_tools", "tab_export_video"]
-                    ),
-                    inputs=var_dict["output"],
-                    outputs=[var_3d_to_video["in_mesh"]] + [main_tabs, sub_tabs_tools],
-                    show_progress=False,
-                    api_name=False,
-                ).success(**var_3d_to_video["preproc_kwargs"], api_name=False)
+        btn_text_to_image.click(
+            fn=text_to_image,
+            inputs=[
+                seed,
+                prompt,
+                negative_prompt,
+            ],
+            outputs=image_output,
+        )
+        btn_image_to_3d.click(
+            fn=image_to_3d,
+            inputs=[seed, image_output],
+            outputs=model_output,
+        )
+        btn_generate_all.click(
+            fn=text_to_image,
+            inputs=[
+                seed,
+                prompt,
+                negative_prompt,
+            ],
+            outputs=image_output,
+        ).success(
+            fn=image_to_3d,
+            inputs=[seed, image_output],
+            outputs=model_output,
+        )
 
-        for i, var_img_to_3d in enumerate([var_img_to_3d_1_1]):
-            var_text_to_img_to_3d[f"to_zero123plus1_{i + 1}"].click(
-                fn=partial(
-                    send_to_click,
-                    target_tab_ids=["tab_img_to_3d", f"tab_zero123plus1_{i + 1}"],
-                ),
-                inputs=[
-                    var_text_to_img_to_3d[k]
-                    for k in ["output_image", "prompt", "negative_prompt"]
-                ],
-                outputs=[
-                    var_img_to_3d[k] for k in ["in_image", "prompt", "negative_prompt"]
-                ]
-                + [main_tabs],
-                show_progress=False,
-                api_name=False,
-            ).success(
-                fn=lambda: gr.Accordion(open=True),
-                inputs=None,
-                outputs=var_img_to_3d["prompt_accordion"],
-                show_progress=False,
-                api_name=False,
-            )
-
-        demo.queue().launch(share=args.share, debug=args.debug)
+        interface.queue().launch(share=args.share, debug=args.debug)
 
 
 if __name__ == "__main__":
