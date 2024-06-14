@@ -939,7 +939,7 @@ class Runner:
         return Image.fromarray(in_img)
 
     @_api_wrapper
-    def run_zero123plus(self, seed, in_img, pbar):
+    def run_zero123plus(self, seed, in_img, pbar=None):
         self.load_zero123plus_pipeline("sudo-ai/zero123plus-v1.1")
         in_img = pad_rgba_image(np.asarray(in_img), ratio=self.zero123plus_pad_ratio)
         print(f"\nRunning Zero123++ generation with seed {seed}...")

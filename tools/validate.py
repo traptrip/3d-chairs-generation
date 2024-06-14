@@ -9,12 +9,7 @@ from tqdm.auto import tqdm
 
 from lib.models.decoders.base_mesh_renderer import MeshRenderer
 from lib.models.autoencoders.base_mesh import Mesh, preprocess_mesh
-from lib.core.utils.camera_utils import (
-    get_pose_from_angles,
-    random_surround_views,
-    get_pose_from_angles_np,
-    view_prompts,
-)
+from lib.core.utils.camera_utils import random_surround_views
 
 reward_model = RM.load("ImageReward-v1.0")
 reward_model.eval()
@@ -106,13 +101,13 @@ if __name__ == "__main__":
         device="cuda:0",
         camera_distance=4,
         num_views=8,
-        preproc_render_size=512,
+        preproc_render_size=256,
         fov=30,
         render_bs=4,
     )
-    df = pd.read_csv("val.csv")
+    df = pd.read_csv("./data/val.csv")
     df = df.dropna(subset=[mesh_path_col])
-    prompts = df["product_summary"].values
+    prompts = df["product_summary"].values[:10]
     meshes = df[mesh_path_col].values
     all_rewards = []
     for prompt, mesh in tqdm(zip(prompts, meshes), total=len(prompts)):
@@ -122,10 +117,10 @@ if __name__ == "__main__":
         elif mesh:
             images = list(list(Path(mesh).parents[1].glob("*-test"))[0].iterdir())
             mv_images = [
-                Image.open(images[0]).crop((0, 0, 512, 512)),
-                Image.open(images[10]).crop((0, 0, 512, 512)),
-                Image.open(images[30]).crop((0, 0, 512, 512)),
-                Image.open(images[100]).crop((0, 0, 512, 512)),
+                Image.open(images[0]).crop((0, 0, 512, 512)).resize((256, 256)),
+                Image.open(images[10]).crop((0, 0, 512, 512)).resize((256, 256)),
+                Image.open(images[30]).crop((0, 0, 512, 512)).resize((256, 256)),
+                Image.open(images[100]).crop((0, 0, 512, 512)).resize((256, 256)),
             ]
             rewards, _ = validate(prompt, mv_images=mv_images)
 
@@ -135,4 +130,9 @@ if __name__ == "__main__":
             img.convert("RGB").save(f"{i}.jpg")
         all_rewards.extend(rewards)
 
-    print(sum(all_rewards) / len(all_rewards))
+
+all_rewards = np.array(all_rewards)
+all_rewards = (all_rewards - all_rewards.min()) / (
+    all_rewards.max() - all_rewards.min()
+)
+print(round(all_rewards.mean(), 4), round(all_rewards.std(), 4))

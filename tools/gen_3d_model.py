@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 from lib.apis.runner import Runner
 
@@ -215,29 +216,60 @@ superres_defaults["denoising_strength"] = 0.4
 superres_defaults["random_init"] = False
 superres_defaults["n_inverse_steps"] = 80
 
+# image_defaults["scheduler"] = "DPMSolverMultistep"
+# image_defaults["negative_prompt"] = "cheap, low-cost, aged, discounted"
+# image_defaults["steps"] = 5
+# image_defaults["adapter_ckpt"] = (
+#     "/home/and/projects/itmo/diploma/sd_fine_tuning/sd-2-1-chairs-lora/checkpoint-4500"
+# )
+# image_defaults["adapter_filename"] = "model.safetensors"
+
+# nerf_mesh_defaults["prompt"] = ""
+# nerf_mesh_defaults["negative_prompt"] = ""
+# nerf_mesh_defaults["scheduler"] = "DPMSolverMultistep"
+# nerf_mesh_defaults["steps"] = 10
+# nerf_mesh_defaults["denoising_strength"] = 0.5
+# nerf_mesh_defaults["random_init"] = False
+# nerf_mesh_defaults["diff_bs"] = 2
+# nerf_mesh_defaults["n_inverse_steps"] = 10
+# nerf_mesh_defaults["init_inverse_steps"] = 640
+# nerf_mesh_defaults["tet_resolution"] = 128
+
+# superres_defaults["do_superres"] = False
+# superres_defaults["scheduler"] = "DPMSolverSDEKarras"
+# superres_defaults["steps"] = 1
+# superres_defaults["denoising_strength"] = 0.4
+# superres_defaults["random_init"] = False
+# superres_defaults["n_inverse_steps"] = 1
+
 
 if __name__ == "__main__":
-    import pandas as pd
-    from tqdm import tqdm
+    # import pandas as pd
+    # from tqdm import tqdm
 
-    data_path = "/home/and/projects/itmo/diploma/data/products/dataset_filtered_with_summary_v0.2.csv"
-    df = pd.read_csv(data_path)
-    prompts = df.product_summary.values
-    mesh_paths = ["" for _ in range(len(df))]
-    for i, prompt in enumerate(tqdm(prompts)):
-        mesh_paths[i] = process(prompt)
-        df["mesh_path"] = mesh_paths
-        df.to_csv("data_with_meshes.csv", index=False)
+    # # data_path = "/home/and/projects/itmo/diploma/data/products/dataset_filtered_with_summary_v0.2.csv"
+    # data_dir = "data"
+    # data_name = "val_test"
+    # data_path = f"{data_dir}/{data_name}.csv"
+    # df = pd.read_csv(data_path).iloc[:1]
+    # prompts = df.product_summary.values
+    # mesh_paths = ["" for _ in range(len(df))]
+    # for i, prompt in enumerate(tqdm(prompts)):
+    #     if not mesh_paths[i]:
+    #         Path(f"{data_dir}/meshes").mkdir(parents=True, exist_ok=True)
+    #         mesh_paths[i] = process(prompt, f"{data_dir}/meshes")
+    #         df["mesh_path"] = mesh_paths
+    #         df.to_csv(f"{data_dir}/{data_name}_with_meshes.csv", index=False)
 
-    df = pd.read_csv("data_with_meshes.csv")
-    mesh_paths = pd.Series(["outputs/"] * len(df)) + df["mesh_path"]
-    video_dir = Path("outputs/videos")
-    video_dir.mkdir(parents=True, exist_ok=True)
-    video_paths = [""] * len(df)
-    for i, mesh_path in enumerate(tqdm(mesh_paths)):
-        video_paths[i] = mesh_to_video(mesh_path, video_dir)
-        df["video_path"] = video_paths
-        df.to_csv("data_with_meshes_and_videos.csv", index=False)
+    # df = pd.read_csv(f"{data_dir}/{data_name}_with_meshes.csv")
+    # mesh_paths = pd.Series([f"{data_dir}/outputs/"] * len(df)) + df["mesh_path"]
+    # video_dir = Path(f"{data_dir}/outputs/videos")
+    # video_dir.mkdir(parents=True, exist_ok=True)
+    # video_paths = [""] * len(df)
+    # for i, mesh_path in enumerate(tqdm(mesh_paths)):
+    #     video_paths[i] = mesh_to_video(mesh_path, video_dir)
+    #     df["video_path"] = video_paths
+    #     df.to_csv(f"{data_dir}/{data_name}_with_meshes_and_videos.csv", index=False)
 
-    # mesh_path = process(prompt, ".")
-    # print(mesh_to_video(mesh_path, "."))
+    mesh_path = process(prompt, ".")
+    print(mesh_to_video(mesh_path, "."))
