@@ -22,8 +22,8 @@ RUN apt-get update && apt-get install git -y && \
 RUN python3 -m pip install torch==2.0.1 torchvision==0.15.2 --extra-index-url https://download.pytorch.org/whl/cu117
 
 COPY requirements.txt $APP_DIR/
+RUN python3 -m pip install setuptools==69.5.1 
 RUN python3 -m pip install --no-warn-script-location -r requirements.txt
-
 
 COPY . $APP_DIR/
 

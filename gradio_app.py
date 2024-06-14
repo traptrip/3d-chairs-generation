@@ -132,9 +132,6 @@ superres_defaults["n_inverse_steps"] = 80
 def parse_args():
     parser = argparse.ArgumentParser(description="3D chairs generation app")
     parser.add_argument(
-        "--advanced", action="store_true", help="Show advanced settings"
-    )
-    parser.add_argument(
         "--debug", action="store_true", help="Save debug images to ./viz"
     )
     parser.add_argument(
