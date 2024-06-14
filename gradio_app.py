@@ -105,9 +105,7 @@ superres_defaults = OrderedDict(
 image_defaults["scheduler"] = "DPMSolverMultistep"
 image_defaults["negative_prompt"] = "cheap, low-cost, aged, discounted"
 image_defaults["steps"] = 75
-image_defaults["adapter_ckpt"] = (
-    "/home/and/projects/itmo/diploma/sd_fine_tuning/sd-2-1-chairs-lora/checkpoint-4500"
-)
+image_defaults["adapter_ckpt"] = "traptrip/sd-2-1-chairs-lora"
 image_defaults["adapter_filename"] = "model.safetensors"
 
 nerf_mesh_defaults["prompt"] = ""

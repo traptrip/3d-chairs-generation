@@ -116,6 +116,7 @@ class Runner:
         self.unet = None
         self.safety_checker = None
         self.feature_extractor = None
+        self.sd_adapter_ckpt = None
 
         self.controlnet_ip2p = None
 
@@ -176,7 +177,7 @@ class Runner:
 
         print("Basic modules initialized.")
 
-    def load_stable_diffusion(self, stable_diffusion_checkpoint):
+    def load_stable_diffusion(self, stable_diffusion_checkpoint, adapter_ckpt=None, adapter_filename=None):
         if stable_diffusion_checkpoint != self.stable_diffusion_checkpoint:
             print("\nLoading Stable Diffusion...")
             self.vae = AutoencoderKL.from_pretrained(
@@ -205,10 +206,8 @@ class Runner:
             )
 
             # LOAD LORA
-            if "stabilityai/stable-diffusion-2-1-base" in stable_diffusion_checkpoint:
-                ckpt_dir = "/home/and/projects/itmo/diploma/sd_fine_tuning/sd-2-1-chairs-lora/checkpoint-4500"
-                lora_filename = "model.safetensors"
-                self.unet.load_attn_procs(ckpt_dir, weight_name=lora_filename)
+            if adapter_ckpt:
+                self.unet.load_attn_procs(adapter_ckpt, weight_name=adapter_filename)
 
             self.vae.to(self.device)
             self.text_encoder.to(self.device)
@@ -1271,7 +1270,11 @@ class Runner:
     def run_text_to_img(self, seed, *args, **kwargs):
         image_kwargs = parse_2d_args(list(args), kwargs)
 
-        self.load_stable_diffusion(image_kwargs["checkpoint"])
+        self.load_stable_diffusion(
+            image_kwargs["checkpoint"],
+            image_kwargs["adapter_ckpt"],
+            image_kwargs["adapter_filename"],
+        )
         self.load_scheduler(image_kwargs["checkpoint"], image_kwargs["scheduler"])
         pipe = StableDiffusionPipeline(
             vae=self.vae,
