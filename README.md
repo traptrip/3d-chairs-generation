@@ -1,4 +1,5 @@
 # 3D chairs generation service
+
 Service of generation of 3D models of chairs 
 Example of the service operation:
 ![](assets/chairs_gen_demo.gif)
