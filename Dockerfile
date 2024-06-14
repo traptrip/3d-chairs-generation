@@ -27,6 +27,5 @@ RUN python3 -m pip install --no-warn-script-location -r requirements.txt
 
 COPY . $APP_DIR/
 
-RUN python3 -m pip install --no-warn-script-location -r requirements-cuda.txt
-
-CMD python3 gradio_app.py --unload-models --empty-cache
+CMD python3 -m pip install --no-warn-script-location -r requirements-cuda.txt && \
+    python3 gradio_app.py --unload-models --empty-cache
